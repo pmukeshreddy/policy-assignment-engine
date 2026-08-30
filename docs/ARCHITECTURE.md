@@ -1,0 +1,195 @@
+# Architecture
+
+## 1. Problem model
+
+An assignment is a dated decision, not a direct rule-to-employee join. Source facts and configuration produce candidates; category cardinality and precedence produce desired policies; reconciliation materializes the difference. This separation lets the system explain losers, retry safely, preview exactly, and answer dated questions.
+
+```mermaid
+flowchart TD
+  Admin[Company admin] -->|one SQL transaction| Source[Versioned source tables]
+  Admin -->|same transaction| Outbox[reconciliation_jobs]
+  Outbox --> Impact[Dependency-aware impact analyzer]
+  Impact --> Scope[Employee + category scopes]
+  Scope --> Snapshot[Effective-dated employee/group snapshot]
+  Snapshot --> Eval[Compiled rule evaluator]
+  Eval --> Candidates[Matched candidates]
+  Candidates --> Resolve[Cardinality + precedence resolver]
+  Resolve --> Desired[Desired policy IDs]
+  Desired --> Diff[Serialized current-vs-desired diff]
+  Diff --> Current[(materialized_assignments)]
+  Diff --> History[(assignment_history)]
+  Resolve --> Audit[(assignment_decisions)]
+  Current --> API[Product/API reads]
+  Audit --> Why[Explanation API]
+```
+
+This is a modular monolith: API and worker processes use the same domain and service modules against one PostgreSQL database. There is no distributed-message consistency gap and no need for Kafka or Redis.
+
+## 2. Data model
+
+```mermaid
+erDiagram
+  companies ||--o{ employees : owns
+  employees ||--o{ employee_versions : versions
+  companies ||--o{ groups : owns
+  groups ||--o{ group_memberships : contains
+  employees ||--o{ group_memberships : joins
+  companies ||--o{ policy_categories : owns
+  policy_categories ||--o{ policies : contains
+  policies ||--o{ policy_versions : versions
+  companies ||--o{ rules : owns
+  rules ||--o{ rule_versions : versions
+  rule_versions ||--o{ rule_dependencies : declares
+  employees ||--o{ manual_overrides : controls
+  employees ||--o{ assignment_decisions : evaluated
+  assignment_decisions ||--o{ materialized_assignments : supports
+  assignment_decisions ||--o{ assignment_history : explains
+  employees ||--o{ scheduled_evaluations : awaits
+  companies ||--o{ reconciliation_jobs : outbox
+```
+
+Core facts remain relational. Extensible employee values, the rule AST, snapshots, traces, and candidate sets are JSONB because their shape is deliberately extensible. Every cross-tenant relationship uses `(company_id, id)` foreign keys, so a valid UUID from another company still fails.
+
+Effective data uses UTC `date` and half-open `[valid_from, valid_to)` intervals. GiST exclusion constraints prevent overlapping employee versions and group memberships. A same-day superseded source version may have an empty interval; immutable decision JSON still preserves what a worker actually evaluated. Product semantics intentionally resolve one final state per calendar day.
+
+## 3. Rule representation and compilation
+
+The recursive, Zod-validated AST permits:
+
+- comparison facts: stable employee fields, arbitrary attribute keys, `tenure_days`, and `as_of_date`;
+- `EQ`, `NE`, `GT`, `GTE`, `LT`, `LTE`, `IN`, and `NOT_IN`;
+- explicit `MEMBER_OF` and `NOT_MEMBER_OF` group nodes;
+- `and`, `or`, and `not` nodes.
+
+No string expression is evaluated and no user code is loaded. `compileRule` validates once, canonicalizes and hashes content, constructs dependency metadata, computes specificity, and returns an evaluator. The worker's bounded LRU-style cache keys by immutable rule-version ID and validates the stored content hash to detect illegal mutation.
+
+Traces contain condition path, fact name, actual value, operator, expected value, and match result.
+
+## 4–6. Matching, cardinality, and conflict precedence
+
+A matched rule proposes an `ASSIGN` candidate. Manual controls propose `ASSIGN` or `EXCLUDE`. The resolver first selects the controlling candidate per policy; a winning exclusion vetoes that policy. It then applies category cardinality:
+
+- `SINGLE`: zero or one distinct policy;
+- `MULTIPLE`: one winning candidate for every eligible distinct policy.
+
+The stable comparison tuple is:
+
+```text
+(manual before rule, priority DESC, specificity DESC, candidate_id ASC, policy_id ASC)
+```
+
+Specificity is the number of leaf predicates. It only breaks equal-priority rule ties; admins should use priority for deliberate business precedence. No result depends on SQL row order, object iteration order, or worker timing. Losers store the winner ID and an explicit reason.
+
+## 7. Source-data versioning
+
+- `employee_versions` records effective employee snapshots and changed fields.
+- `group_memberships` records dated membership intervals.
+- `policy_versions` records name, enabled state, metadata, and effective interval.
+- `rule_versions` are immutable `DRAFT`/`PUBLISHED` records; publishing closes the previous effective interval.
+- `manual_overrides` retain their interval and revocation timestamp.
+- policy/category/rule/employee keys are stable identities; mutable behavior is versioned.
+
+Published historical rule versions remain `PUBLISHED`; `valid_from/valid_to` determines which was active. Historical assignment reads come from `assignment_history`, while explanation reads choose the latest dated decision that still contains the requested winner.
+
+## 8. Reconciliation flow
+
+For an `(employee_id, category_id, as_of_date)` scope:
+
+1. Acquire a transaction-scoped advisory lock derived from employee and category.
+2. Load the effective employee version, group set, category, possible rule versions, policy versions, and overrides.
+3. Evaluate relevant rules and create candidate traces.
+4. Resolve once with the cardinality resolver.
+5. Fingerprint every effective input and reuse an identical decision on retry.
+6. Lock current materialized rows.
+7. Delete only stale policies, close their history, and insert only missing policies/history.
+8. Do not update unchanged assignment rows.
+9. Replace future temporal schedules for the scope.
+10. Commit the decision, diff, history, and schedules atomically.
+
+`slot_key` is category ID for `SINGLE` and policy ID for `MULTIPLE`; a unique `(company, employee, slot_key)` index provides a database backstop against two single-cardinality winners.
+
+## 9. Impact analysis
+
+`rule_dependencies` indexes every fact/group/time dependency. The impact strategy is conservative: it may include extra work but must never omit an employee who can change.
+
+| Event | Impact selection |
+|---|---|
+| Employee field/attribute update | Active rule dependencies for only changed keys → distinct categories for that employee |
+| Group membership update | Rules depending on that exact group → categories for that employee |
+| Rule publish | Union of previous/new categories and their sound mandatory-selector populations |
+| Policy version | Current assignees plus selector populations of rules targeting the policy |
+| Override or scheduled transition | Exact employee/category |
+| Explicit full run | Tenant employee × category cross-product |
+
+A selector is only marked mandatory when logically safe. Predicates inside `AND` are mandatory; for `OR`, only structurally identical selectors present in every branch survive; selectors under `NOT` never narrow impact. Supported equality/`IN` and group selectors use indexed employee versions, JSONB attributes, or memberships. Rules without a sound selector deliberately fall back to all company employees.
+
+Rule updates consider both the old and new selector populations, so employees leaving the selector are reconciled as well as employees entering it.
+
+## 10. Time-triggered reevaluation
+
+The compiled evaluator calculates the next possible truth transition for integer tenure and calendar-date comparisons, including equality's start and end days, plus rule/override boundaries. Reconciliation persists those transitions in `scheduled_evaluations`.
+
+One worker loop claims due schedule rows with `FOR UPDATE SKIP LOCKED`, writes a deduplicated temporal job, and marks the schedule processed in the same transaction. Future-effective employee, membership, rule, policy, and override mutations also set the outbox job's `available_at`, preventing a future employee from being retried before an effective snapshot exists.
+
+## 11. Audit and explanation
+
+`assignment_decisions` is first-class audit data containing:
+
+- employee version and full effective snapshot, including sorted group IDs;
+- input fingerprint and evaluation date;
+- every matched rule/manual candidate;
+- rule version IDs, condition traces, actual/expected values, priority, and specificity;
+- winners and rejected candidates with winner references/reasons;
+- next temporal transition and source reconciliation job.
+
+Assignment history references the decision that created each interval. Later decisions are retained even when the policy remains unchanged, allowing “why on date Z?” to use the latest effective evidence without rewriting the materialized assignment.
+
+## 12. Preview workflow
+
+Preview compiles the proposed draft, replaces the selected rule identity (or adds a new one), and processes employees in batches of 500. It bulk-loads employee/group snapshots, overrides, and materialized baselines for each batch. Each employee uses the same `PolicyEvaluator` and `resolveCandidates` implementation as reconciliation.
+
+The response reports employees evaluated/affected/unchanged, assignment rows added/removed, employees with replacements, and bounded representative examples. `PREVIEW_MAX_EMPLOYEES` provides an explicit safety limit; exceeding it fails rather than returning an approximate answer.
+
+## 13. Database indexes
+
+Important access paths include:
+
+- tenant/external employee uniqueness and current effective employee fields;
+- GiST non-overlap indexes on employee versions, memberships, and assignment history;
+- GIN `jsonb_path_ops` on current arbitrary attributes;
+- membership indexes in both employee and group direction;
+- active rule versions by company/date and rule dependencies by `(company, type, key)`;
+- active overrides by employee/date;
+- materialized reads by `(company, employee, category)`;
+- explanation decisions by `(company, employee, category, as_of_date DESC)`;
+- partial job claim and due-schedule indexes.
+
+Selectors compare JSONB values with parameters, and dynamic employee-column selection is restricted to a hardcoded safe map.
+
+## 14–15. Transactional, retry, and concurrency model
+
+Every relevant API mutation and outbox insert share one SQL transaction. Workers atomically claim one pending or expired-lease job with `SKIP LOCKED`, increment attempts, and record ownership. Long jobs renew their lease. Failures store a bounded error, release ownership, and retry with exponential backoff; the final attempt becomes visible `DEAD` state.
+
+Assignment writes use a transaction-scoped advisory lock per employee/category, row locks on current assignments, unique slots, deterministic results, decision fingerprints, and differential inserts/deletes. Duplicate delivery and concurrent jobs therefore converge. No exception is silently converted into a guessed policy.
+
+## 16. Scaling strategy
+
+The first scaling lever is less work: dependency-to-category impact, mandatory rule selectors, compiled rules, materialized reads, and batched preview. Independent jobs run with bounded worker concurrency; PostgreSQL coordinates claims and per-scope serialization. Stateless API/worker replicas can be added against one primary PostgreSQL database.
+
+For much larger tenants, rule-impact scopes can be emitted as bounded child jobs and historical decision JSON can be time-partitioned without changing domain semantics. The current single job streams its scope loop serially and heartbeats; it is intentionally simpler for this challenge and safe for the demonstrated 100k population.
+
+## 17. Measured performance
+
+The reproducible benchmark uses the real compiled `PolicyEvaluator` and conflict resolver. It covers 1k, 10k, and 100k employees and 100, 1k, and 5k rules. Full results and methodology are in [benchmark-results/latest.md](../benchmark-results/latest.md).
+
+The measured location mutation reduced rules evaluated by 90% in every synthetic scenario because one of ten dependency-homogeneous categories was affected. This is workload-specific evidence, not a universal ratio. Fifty real PostgreSQL transactions measured 3.185 ms p50 and 4.922 ms p95 locally.
+
+## 18. Known tradeoffs
+
+- Effective time is calendar-date, not intra-day. Decision records preserve multiple evaluations, but assignment “as of” semantics return the final state for a day.
+- Mutation APIs reject backdated corrections after an identity exists; apply imports before the desired effective date. This avoids silently rewriting already-audited assignment history.
+- Exact preview intentionally refuses populations over its configured bound; it does not sample or estimate.
+- Rule impact without a logically mandatory selector scans the company's employees. This is required for correctness with `OR`, `NOT`, and pure time rules.
+- Rule-impact employee IDs are currently held in memory for one job. The tested 100k scale is practical; multi-million-employee tenants should page them into child jobs.
+- The admin UI is deliberately compact and its visual builder creates one comparison at a time. The API accepts the complete nested AST.
+- Authentication is outside this submission's scope. Deploy behind an authenticated admin gateway that supplies an authorized company ID; the header alone is not proof of identity.
