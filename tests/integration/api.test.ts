@@ -5,6 +5,7 @@ import { buildApp } from '../../src/api/app.js';
 import { createPool, type DbPool } from '../../src/db.js';
 import { ReconciliationService } from '../../src/services/reconciliation.js';
 import { ReconciliationWorker } from '../../src/services/worker.js';
+import { compareRegressionCheckpoint } from '../../src/eval/regression.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL ?? 'postgres://policy:policy@localhost:5432/policy_engine';
 let now = new Date('2026-08-01T12:00:00Z');
@@ -58,6 +59,14 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     });
     await drainJobs();
 
+    const regressionCheckpoint = await compareRegressionCheckpoint(pool, {
+      companyId,
+      employeeIds: [employee.id],
+      asOfDate: '2026-08-01',
+    });
+    expect(regressionCheckpoint.mismatches).toEqual([]);
+    expect(regressionCheckpoint.deterministicFailures).toBe(0);
+
     const initial = await request('GET', `/employees/${employee.id}/assignments`);
     expect(initial.data).toHaveLength(1);
     expect(initial.data[0].policy_key).toBe('enhanced');
@@ -81,6 +90,11 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     });
 
     now = new Date('2026-08-02T12:00:00Z');
+    await request('POST', `/rules/${enhancedRule.id}/versions`, {
+      policyId: enhanced.id, priority: 21, enabled: true, validFrom: '2026-08-02', publish: true,
+      condition: { type: 'comparison', fact: { kind: 'employee', field: 'location' }, operator: 'EQ', value: 'CA' },
+    });
+    await drainJobs();
     const manual = await request('POST', '/manual-overrides', {
       employeeId: employee.id, policyId: standard.id, action: 'ASSIGN', priority: -100,
       reason: 'Approved exception', validFrom: '2026-08-02',
@@ -120,6 +134,14 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     expect(restored.data[0].policy_key).toBe('enhanced');
     const stableHistory = await request('GET', `/employees/${employee.id}/assignments/as-of?date=2026-08-01`);
     expect(stableHistory.data[0].policy_key).toBe('enhanced');
+
+    const sameDayOverride = await request('POST', '/manual-overrides', {
+      employeeId: employee.id, policyId: standard.id, action: 'EXCLUDE', priority: 0,
+      reason: 'Same-day revocation regression', validFrom: '2026-08-03',
+    });
+    await request('DELETE', `/manual-overrides/${sameDayOverride.id}`);
+    await drainJobs();
+    expect((await request('GET', `/employees/${employee.id}/assignments`)).data[0].policy_key).toBe('enhanced');
   });
 
   it('uses group dependency impact without disturbing another category', async () => {
@@ -184,6 +206,26 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     await pool.query('DELETE FROM companies WHERE id = $1', [other.id]);
   });
 
+  it('reserves evaluation-tenant jobs for an explicitly scoped worker', async () => {
+    const evaluationCompany = await request('POST', '/companies', { name: `Evaluation ${crypto.randomUUID()}` }, false);
+    await pool.query(
+      `INSERT INTO evaluation_tenants (key, company_id, dataset_id)
+       VALUES ($1, $2, 'integration-evaluation')`,
+      [`integration-${crypto.randomUUID()}`, evaluationCompany.id],
+    );
+    const job = await pool.query<{ id: string }>(
+      `INSERT INTO reconciliation_jobs (company_id, event_type, scope, payload, dedupe_key)
+       VALUES ($1, 'INTEGRATION_EVALUATION_JOB', 'FULL', '{}'::jsonb, 'integration-evaluation-job')
+       RETURNING id`,
+      [evaluationCompany.id],
+    );
+    const unscoped = new ReconciliationWorker(pool, workerConfig, clock);
+    expect(await unscoped.processNext()).toBeNull();
+    const scoped = new ReconciliationWorker(pool, workerConfig, clock, evaluationCompany.id);
+    expect((await scoped.processNext())?.job.id).toBe(job.rows[0]!.id);
+    await pool.query('DELETE FROM companies WHERE id = $1', [evaluationCompany.id]);
+  });
+
   it('delays a future-effective employee job and excludes the employee from current impact', async () => {
     now = new Date('2026-08-30T12:00:00Z');
     const employee = await request('POST', '/employees', {
@@ -212,7 +254,7 @@ describe('PostgreSQL API, reconciliation, and history', () => {
 });
 
 function makeWorker(): ReconciliationWorker {
-  return new ReconciliationWorker(pool, workerConfig, clock);
+  return new ReconciliationWorker(pool, workerConfig, clock, companyId);
 }
 
 async function drainJobs(): Promise<void> {

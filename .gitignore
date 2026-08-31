@@ -1,6 +1,9 @@
 node_modules/
 dist/
 coverage/
+eval-results/*
+!eval-results/latest.json
+!eval-results/latest.md
 .env
 *.log
 .DS_Store

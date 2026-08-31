@@ -677,11 +677,13 @@ function registerRuleRoutes(app: FastifyInstance, pool: DbPool, clock: () => Dat
     const compiled = compileRule(body.condition);
     const result = await inTransaction(pool, async (client) => {
       const rule = await client.query<{ next_version: number }>(
-        `SELECT COALESCE(max(rv.version), 0)::int + 1 AS next_version
+        `SELECT COALESCE((
+                  SELECT max(rv.version)
+                    FROM rule_versions rv
+                   WHERE rv.company_id = r.company_id AND rv.rule_id = r.id
+                ), 0)::int + 1 AS next_version
            FROM rules r
-           LEFT JOIN rule_versions rv ON rv.company_id = r.company_id AND rv.rule_id = r.id
           WHERE r.company_id = $1 AND r.id = $2
-          GROUP BY r.id
           FOR UPDATE OF r`,
         [companyId, ruleId],
       );
@@ -881,7 +883,11 @@ function registerOverrideRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       const endDate = today < row.valid_from ? row.valid_from : today;
       await client.query(
         `UPDATE manual_overrides
-            SET revoked_at = now(), valid_to = LEAST(COALESCE(valid_to, $3::date), $3::date)
+            SET revoked_at = now(),
+                valid_to = CASE
+                  WHEN $3::date > valid_from THEN LEAST(COALESCE(valid_to, $3::date), $3::date)
+                  ELSE valid_to
+                END
           WHERE company_id = $1 AND id = $2`,
         [companyId, overrideId, endDate],
       );

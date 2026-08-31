@@ -11,7 +11,7 @@ Invalid bodies return structured `400 VALIDATION_ERROR`; cross-tenant/missing en
 
 ## Companies
 
-- `POST /companies` — `{ "name": "Acme" }`
+- `POST /companies` — `{ "name": "YOUR_COMPANY_NAME" }`
 - `GET /companies`
 - `GET /health`
 
@@ -24,16 +24,16 @@ Invalid bodies return structured `400 VALIDATION_ERROR`; cross-tenant/missing en
 
 ```json
 {
-  "externalId": "E-100",
-  "displayName": "Avery Chen",
-  "email": "avery@example.com",
-  "location": "CA",
-  "department": "Engineering",
-  "employmentType": "full_time",
+  "externalId": "EMPLOYEE_EXTERNAL_ID",
+  "displayName": "EMPLOYEE_DISPLAY_NAME",
+  "email": "EMPLOYEE_EMAIL",
+  "location": "EMPLOYEE_LOCATION",
+  "department": "EMPLOYEE_DEPARTMENT",
+  "employmentType": "EMPLOYMENT_TYPE",
   "isManager": false,
-  "hireDate": "2024-01-15",
-  "attributes": { "country": "US", "level": 4 },
-  "effectiveFrom": "2026-08-30"
+  "hireDate": "YYYY-MM-DD",
+  "attributes": {},
+  "effectiveFrom": "YYYY-MM-DD"
 }
 ```
 

@@ -7,5 +7,5 @@
     "declaration": true
   },
   "include": ["src", "scripts"],
-  "exclude": ["tests", "benchmarks"]
+  "exclude": ["tests"]
 }

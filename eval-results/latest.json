@@ -1,0 +1,93 @@
+{
+  "status": "PASSED",
+  "seed": 482901,
+  "dataset": {
+    "id": "k397-673e",
+    "importId": "85c3a781-7b53-4ca9-882c-a45ca2a7bda3",
+    "checksum": "dbf4a9c0fea6ddea244a37ef5e6b21901b4fc714826f3f18666162a4cb687eaf"
+  },
+  "employees": 50000,
+  "rules": 300,
+  "stateMutations": 100000,
+  "batchesVerified": 227,
+  "oracleComparisons": 8675538,
+  "configuration": {
+    "localizedBatchSize": 500,
+    "workerConcurrency": 12
+  },
+  "invariants": {
+    "assignmentMismatches": 0,
+    "impactFalseNegatives": 0,
+    "cardinalityViolations": 0,
+    "determinismFailures": 0,
+    "idempotencyFailures": 0,
+    "tenantIsolationFailures": 0,
+    "duplicateActiveAssignments": 0
+  },
+  "performance": {
+    "reconciliationP50Ms": 46.199,
+    "reconciliationP95Ms": 582.728,
+    "reconciliationP99Ms": 733.56,
+    "averageRulesEvaluatedPerMutation": 335.505,
+    "incrementalRulesEvaluated": 33550536,
+    "fullRecomputeRulesEvaluated": 421438330,
+    "ruleEvaluationWorkAvoidedPercent": 92.039,
+    "reconciliationJobs": 101269,
+    "reconciliationJobsByScope": {
+      "EMPLOYEE": 60824,
+      "OVERRIDE": 22440,
+      "GROUP": 16710,
+      "TEMPORAL": 1270,
+      "RULE": 21,
+      "POLICY": 4
+    },
+    "jobThroughputPerSecond": 47.932,
+    "localizedMutationThroughputPerSecond": 45.784,
+    "affectedScopesPerSecond": 316.76,
+    "largePopulationChangeP50Ms": 4798.972,
+    "largePopulationChangeP95Ms": 41806.405,
+    "largePopulationChangeMaxMs": 96195.484,
+    "largeRuleChangeP50Ms": 4812.172,
+    "largeRuleChangeP95Ms": 36629.193,
+    "largeRuleChangeMaxMs": 96195.484,
+    "temporalTransitionMs": 3817.65,
+    "mutationRuntimeMs": 2779813.597,
+    "totalRuntimeMs": 3251560.216
+  },
+  "baseline": {
+    "reconciliationJobs": 1,
+    "scopesReconciled": 300000,
+    "durationMs": 276676.898
+  },
+  "workerCalibration": {
+    "selectedConcurrency": 12,
+    "candidates": [
+      {
+        "concurrency": 8,
+        "jobs": 240,
+        "scopes": 480,
+        "durationMs": 746.103,
+        "scopesPerSecond": 643.343
+      },
+      {
+        "concurrency": 12,
+        "jobs": 240,
+        "scopes": 480,
+        "durationMs": 505.233,
+        "scopesPerSecond": 950.057
+      },
+      {
+        "concurrency": 16,
+        "jobs": 240,
+        "scopes": 480,
+        "durationMs": 559.373,
+        "scopesPerSecond": 858.103
+      }
+    ]
+  },
+  "artifacts": {
+    "json": "eval-results/latest.json",
+    "markdown": "eval-results/latest.md",
+    "batches": "eval-results/batches-seed-482901.jsonl"
+  }
+}

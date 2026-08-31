@@ -105,6 +105,66 @@ export async function loadEmployeeSnapshot(
   };
 }
 
+export async function loadEmployeeSnapshots(
+  db: Queryable,
+  companyId: string,
+  employeeIds: readonly string[],
+  asOfDate: string,
+): Promise<Map<string, EmployeeSnapshot>> {
+  const snapshots = new Map<string, EmployeeSnapshot>();
+  const uniqueIds = [...new Set(employeeIds)];
+  for (let offset = 0; offset < uniqueIds.length; offset += 1_000) {
+    const result = await db.query<EmployeeSnapshotRow>(
+      `SELECT e.id,
+              e.company_id,
+              ev.id AS version_id,
+              e.external_id,
+              ev.email,
+              ev.location,
+              ev.department,
+              ev.employment_type,
+              ev.is_manager,
+              ev.hire_date::text,
+              ev.attributes,
+              COALESCE(array_agg(gm.group_id::text ORDER BY gm.group_id)
+                FILTER (WHERE gm.group_id IS NOT NULL), '{}') AS group_ids
+         FROM employees e
+         JOIN employee_versions ev
+           ON ev.company_id = e.company_id
+          AND ev.employee_id = e.id
+          AND ev.valid_from <= $3::date
+          AND (ev.valid_to IS NULL OR ev.valid_to > $3::date)
+         LEFT JOIN group_memberships gm
+           ON gm.company_id = e.company_id
+          AND gm.employee_id = e.id
+          AND gm.valid_from <= $3::date
+          AND (gm.valid_to IS NULL OR gm.valid_to > $3::date)
+        WHERE e.company_id = $1 AND e.id = ANY($2::uuid[])
+        GROUP BY e.id, ev.id
+        ORDER BY e.id`,
+      [companyId, uniqueIds.slice(offset, offset + 1_000), asOfDate],
+    );
+    for (const row of result.rows) {
+      snapshots.set(row.id, {
+        id: row.id,
+        companyId: row.company_id,
+        versionId: row.version_id,
+        externalId: row.external_id,
+        email: row.email,
+        location: row.location,
+        department: row.department,
+        employmentType: row.employment_type,
+        isManager: row.is_manager,
+        hireDate: row.hire_date,
+        attributes: row.attributes,
+        groupIds: new Set(row.group_ids ?? []),
+        asOfDate,
+      });
+    }
+  }
+  return snapshots;
+}
+
 export async function loadCategory(db: Queryable, companyId: string, categoryId: string): Promise<CategoryRecord | null> {
   const result = await db.query<CategoryRecord>(
     `SELECT id, cardinality, key, name
@@ -208,4 +268,51 @@ export async function loadOverridesForCategory(
     validFrom: row.valid_from,
     validTo: row.valid_to,
   }));
+}
+
+export async function loadOverridesForScopes(
+  db: Queryable,
+  companyId: string,
+  employeeIds: readonly string[],
+  asOfDate: string,
+): Promise<Map<string, EvaluatableOverride[]>> {
+  const grouped = new Map<string, EvaluatableOverride[]>();
+  const uniqueIds = [...new Set(employeeIds)];
+  for (let offset = 0; offset < uniqueIds.length; offset += 1_000) {
+    const result = await db.query<OverrideRow & { employee_id: string }>(
+      `SELECT mo.id,
+              mo.employee_id,
+              mo.policy_id,
+              p.category_id,
+              mo.action,
+              mo.priority,
+              mo.reason,
+              mo.valid_from::text,
+              mo.valid_to::text
+         FROM manual_overrides mo
+         JOIN policies p ON p.company_id = mo.company_id AND p.id = mo.policy_id
+        WHERE mo.company_id = $1
+          AND mo.employee_id = ANY($2::uuid[])
+          AND mo.revoked_at IS NULL
+          AND (mo.valid_to IS NULL OR mo.valid_to > $3::date)
+        ORDER BY mo.employee_id, p.category_id, mo.id`,
+      [companyId, uniqueIds.slice(offset, offset + 1_000), asOfDate],
+    );
+    for (const row of result.rows) {
+      const key = `${row.employee_id}:${row.category_id}`;
+      const values = grouped.get(key) ?? [];
+      values.push({
+        id: row.id,
+        policyId: row.policy_id,
+        categoryId: row.category_id,
+        action: row.action,
+        priority: row.priority,
+        reason: row.reason,
+        validFrom: row.valid_from,
+        validTo: row.valid_to,
+      });
+      grouped.set(key, values);
+    }
+  }
+  return grouped;
 }

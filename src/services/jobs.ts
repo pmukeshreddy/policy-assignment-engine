@@ -58,19 +58,27 @@ export async function claimJob(
   workerId: string,
   leaseSeconds: number,
   maxAttempts: number,
+  companyId?: string,
 ): Promise<ReconciliationJob | null> {
   return inTransaction(pool, async (client) => {
     const result = await client.query<JobRow>(
       `WITH candidate AS (
-         SELECT id
-           FROM reconciliation_jobs
-          WHERE attempts < $3
-            AND available_at <= now()
+         SELECT queued.id
+           FROM reconciliation_jobs queued
+          WHERE queued.attempts < $3
             AND (
-              status = 'PENDING'
-              OR (status = 'RUNNING' AND locked_at < now() - make_interval(secs => $2))
+              ($4::uuid IS NOT NULL AND queued.company_id = $4)
+              OR ($4::uuid IS NULL AND NOT EXISTS (
+                SELECT 1 FROM evaluation_tenants evaluation
+                 WHERE evaluation.company_id = queued.company_id
+              ))
             )
-          ORDER BY priority DESC, created_at, id
+            AND queued.available_at <= now()
+            AND (
+              queued.status = 'PENDING'
+              OR (queued.status = 'RUNNING' AND queued.locked_at < now() - make_interval(secs => $2))
+            )
+          ORDER BY queued.priority DESC, queued.created_at, queued.id
           FOR UPDATE SKIP LOCKED
           LIMIT 1
        )
@@ -84,7 +92,7 @@ export async function claimJob(
          FROM candidate
         WHERE job.id = candidate.id
       RETURNING job.id, job.company_id, job.event_type, job.scope, job.payload, job.attempts`,
-      [workerId, leaseSeconds, maxAttempts],
+      [workerId, leaseSeconds, maxAttempts, companyId ?? null],
     );
     const row = result.rows[0];
     return row === undefined

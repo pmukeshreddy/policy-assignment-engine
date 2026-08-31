@@ -8,10 +8,19 @@ import { claimJob, enqueueJob, markJobFailed, markJobSucceeded, type Reconciliat
 import { ReconciliationService, type ReconciliationResult } from './reconciliation.js';
 
 interface ScheduledRow {
-  id: string;
   company_id: string;
   employee_id: string;
   category_id: string;
+  schedule_ids: string[];
+}
+
+const RECONCILIATION_TRANSACTION_SIZE = 500;
+
+export interface JobProcessingReport {
+  job: ReconciliationJob;
+  results: ReconciliationResult[];
+  durationMs: number;
+  error: string | null;
 }
 
 export class ReconciliationWorker {
@@ -27,6 +36,7 @@ export class ReconciliationWorker {
       'WORKER_POLL_MS' | 'WORKER_CONCURRENCY' | 'JOB_MAX_ATTEMPTS' | 'JOB_LEASE_SECONDS'
     >,
     private readonly clock: () => Date = () => new Date(),
+    private readonly companyId?: string,
   ) {
     this.impact = new ImpactAnalyzer(pool, clock);
     this.reconciliation = new ReconciliationService(pool);
@@ -42,46 +52,64 @@ export class ReconciliationWorker {
   }
 
   async processOne(): Promise<boolean> {
+    return (await this.processNext()) !== null;
+  }
+
+  async processNext(): Promise<JobProcessingReport | null> {
     const job = await claimJob(
       this.pool,
       this.workerId,
       this.config.JOB_LEASE_SECONDS,
       this.config.JOB_MAX_ATTEMPTS,
+      this.companyId,
     );
-    if (job === null) return false;
+    if (job === null) return null;
+    const started = performance.now();
     try {
-      await this.processJob(job);
+      const results = await this.processJob(job);
       await markJobSucceeded(this.pool, job.id, this.workerId);
+      return { job, results, durationMs: performance.now() - started, error: null };
     } catch (error) {
       await markJobFailed(this.pool, job, this.workerId, error, this.config.JOB_MAX_ATTEMPTS);
+      return {
+        job,
+        results: [],
+        durationMs: performance.now() - started,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      };
     }
-    return true;
   }
 
   async processJob(job: ReconciliationJob): Promise<ReconciliationResult[]> {
     const scopes = await this.impact.analyze(job);
     const asOfDate = todayUtc(this.clock);
     const results: ReconciliationResult[] = [];
-    let lastHeartbeat = Date.now();
-    for (const scope of scopes) {
-      if (Date.now() - lastHeartbeat >= Math.max(1_000, this.config.JOB_LEASE_SECONDS * 500)) {
-        const heartbeat = await this.pool.query(
-          `UPDATE reconciliation_jobs SET locked_at = now()
-            WHERE id = $1 AND status = 'RUNNING' AND locked_by = $2`,
-          [job.id, this.workerId],
+    await this.reconciliation.prepareJob({ companyId: job.companyId, asOfDate, scopes });
+    try {
+      let lastHeartbeat = Date.now();
+      for (let offset = 0; offset < scopes.length; offset += RECONCILIATION_TRANSACTION_SIZE) {
+        if (Date.now() - lastHeartbeat >= Math.max(1_000, this.config.JOB_LEASE_SECONDS * 500)) {
+          const heartbeat = await this.pool.query(
+            `UPDATE reconciliation_jobs SET locked_at = now()
+              WHERE id = $1 AND status = 'RUNNING' AND locked_by = $2`,
+            [job.id, this.workerId],
+          );
+          if (heartbeat.rowCount !== 1) throw new Error(`Lost lease for reconciliation job ${job.id}`);
+          lastHeartbeat = Date.now();
+        }
+        const batch = scopes.slice(offset, offset + RECONCILIATION_TRANSACTION_SIZE);
+        results.push(
+          ...await this.reconciliation.reconcileEmployeeCategories(batch.map((scope) => ({
+            companyId: job.companyId,
+            employeeId: scope.employeeId,
+            categoryId: scope.categoryId,
+            asOfDate,
+            jobId: job.id,
+          }))),
         );
-        if (heartbeat.rowCount !== 1) throw new Error(`Lost lease for reconciliation job ${job.id}`);
-        lastHeartbeat = Date.now();
       }
-      results.push(
-        await this.reconciliation.reconcileEmployeeCategory({
-          companyId: job.companyId,
-          employeeId: scope.employeeId,
-          categoryId: scope.categoryId,
-          asOfDate,
-          jobId: job.id,
-        }),
-      );
+    } finally {
+      this.reconciliation.clearPreparedJob();
     }
     return results;
   }
@@ -89,13 +117,21 @@ export class ReconciliationWorker {
   async enqueueDueTemporalJobs(limit = 1_000): Promise<number> {
     return inTransaction(this.pool, async (client) => {
       const due = await client.query<ScheduledRow>(
-        `SELECT id, company_id, employee_id, category_id
-           FROM scheduled_evaluations
-          WHERE processed_at IS NULL AND transition_date <= $1::date
-          ORDER BY transition_date, id
-          FOR UPDATE SKIP LOCKED
-          LIMIT $2`,
-        [todayUtc(this.clock), limit],
+        `WITH selected AS (
+           SELECT id, company_id, employee_id, category_id
+             FROM scheduled_evaluations
+            WHERE processed_at IS NULL
+              AND transition_date <= $1::date
+              AND ($2::uuid IS NULL OR company_id = $2)
+            ORDER BY transition_date, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT $3
+         )
+         SELECT company_id, employee_id, category_id, array_agg(id::text ORDER BY id) AS schedule_ids
+           FROM selected
+          GROUP BY company_id, employee_id, category_id
+          ORDER BY company_id, employee_id, category_id`,
+        [todayUtc(this.clock), this.companyId ?? null, limit],
       );
       for (const row of due.rows) {
         await enqueueJob(client, {
@@ -103,12 +139,12 @@ export class ReconciliationWorker {
           eventType: 'TEMPORAL_TRANSITION_DUE',
           scope: 'TEMPORAL',
           payload: { employeeId: row.employee_id, categoryId: row.category_id },
-          dedupeKey: `temporal:${row.id}`,
+          dedupeKey: `temporal:${row.employee_id}:${row.category_id}:${todayUtc(this.clock)}`,
           priority: 10,
         });
-        await client.query('UPDATE scheduled_evaluations SET processed_at = now() WHERE id = $1', [row.id]);
+        await client.query('UPDATE scheduled_evaluations SET processed_at = now() WHERE id = ANY($1::uuid[])', [row.schedule_ids]);
       }
-      return due.rows.length;
+      return due.rows.reduce((count, row) => count + row.schedule_ids.length, 0);
     });
   }
 

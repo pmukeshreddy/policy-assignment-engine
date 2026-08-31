@@ -20,7 +20,7 @@ function notify(message, error = false) {
 async function loadCompanies() {
   const { data } = await api('/companies'); const select = $('#company');
   if (!data.length) {
-    const name = prompt('Create the first company to begin:', 'Demo Company');
+    const name = prompt('Create the first company to begin:');
     if (!name) return;
     const company = await api('/companies', { method: 'POST', body: JSON.stringify({ name }) }); data.push(company);
   }

@@ -2,7 +2,7 @@
 
 A production-minded, generic policy assignment system built as a TypeScript modular monolith with PostgreSQL. It versions source data, incrementally reconciles only impacted employee/category scopes, materializes product reads, records complete decisions, schedules date transitions, and previews rule changes through the same evaluator and resolver used in production.
 
-The demo policies are seed data only. The engine has no Warp-specific policy names or business rules.
+The repository ships with no company, employee, group, policy, membership, rule, or assignment records. The engine has no Warp-specific policy names or business rules.
 
 ## What is implemented
 
@@ -22,9 +22,9 @@ The demo policies are seed data only. The engine has no Warp-specific policy nam
 - Exact rule preview through the production evaluator/resolver
 - Tenant-scoped API and a small admin console at `/admin/`
 - Unit, PostgreSQL integration, concurrency, temporal, API, and randomized oracle tests
-- Reproducible 1k/10k/100k employee and 100/1k/5k rule benchmarks
+- Reproducible 50,000-employee NYC Open Data regression evaluation with 300 evaluation-only rules and 100,000 mutations
 
-See [Architecture](docs/ARCHITECTURE.md), [API guide](docs/API.md), and [measured benchmark output](benchmark-results/latest.md).
+See [Architecture](docs/ARCHITECTURE.md) and the [API guide](docs/API.md).
 
 ## Quick start with Docker
 
@@ -35,13 +35,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-In another terminal, load the generic demo scenario:
-
-```bash
-docker compose exec app node dist/scripts/seed.js
-```
-
-Open <http://localhost:3000/admin/>. The seed command prints the company UUID; select the demo company in the console. The API health endpoint is <http://localhost:3000/health>.
+Open <http://localhost:3000/admin/> and create the first company. The database starts empty by design. The API health endpoint is <http://localhost:3000/health>.
 
 PostgreSQL data persists in the `policy-postgres` volume. The `migrate` container must finish successfully before the API and worker start.
 
@@ -54,7 +48,6 @@ docker compose up -d postgres
 npm ci
 cp .env.example .env
 npm run db:migrate
-npm run seed
 npm run dev
 ```
 
@@ -72,11 +65,76 @@ npm run lint
 npm test                 # unit + 100-scenario randomized harness
 npm run test:integration # PostgreSQL/API suite
 npm run test:all         # every test, PostgreSQL must be available
-npm run benchmark        # writes benchmark-results/latest.{json,md}
 npm run build
 ```
 
 `npm run db:reset` refuses production databases. It only accepts a database ending in `_test`, unless `ALLOW_DATABASE_RESET=true` is set explicitly.
+
+## NYC Open Data regression evaluation
+
+The large regression harness uses the official [NYC Citywide Payroll Data](https://data.cityofnewyork.us/api/v3/views/k397-673e/query.json) as employee facts. It does **not** claim that its generated policy universe represents NYC policy. Policies, groups, and rules are deterministic evaluation configuration derived from observed fact distributions and are labelled `evaluationOnly` in PostgreSQL.
+
+With PostgreSQL running and migrations applied:
+
+```bash
+npm run data:nyc
+npm run eval:regression -- --seed=482901
+```
+
+`data:nyc` performs the network operation. It discovers the latest fiscal year, pages the Socrata endpoint, validates every row, and continues until exactly 50,000 usable records have been imported. `NYC_APP_TOKEN` is optional. Names are discarded; stable opaque employee IDs are derived from the dataset ID and Socrata row identity. Agency, agency start date, borough, title, pay basis, leave status, payroll number, fiscal year, and numeric pay facts are normalized into the production employee/version schema.
+
+The import records its source URL, exact SoQL query, fetch time, counts, skip reasons, dataset/fiscal-year metadata, and SHA-256 checksum in `dataset_imports`. Per-employee provenance is retained in `employee_import_records`. No downloaded JSON or imported employee records are committed to Git.
+
+`eval:regression` is offline with respect to NYC: it refuses to run unless PostgreSQL already contains the required imported population. It deterministically builds 300 evaluation-only rules and runs at least 100,000 state mutations through:
+
+```text
+Fastify mutation API → transactional outbox → ImpactAnalyzer → worker
+→ ReconciliationService → PostgreSQL materialization → independent full oracle
+```
+
+Every checkpoint compares exact policy IDs. The run fails immediately and writes the seed plus executed mutation prefix if assignments, impact completeness, cardinality, determinism, idempotency, duplicate protection, or tenant isolation diverge. Successful human and JSON summaries are written to `eval-results/latest.md` and `eval-results/latest.json`; the latest certified summaries are committed. Per-batch replay ledgers and failure artifacts remain ignored because they are large and machine-specific.
+
+The certified seed-`482901` run completed on 2026-08-31 against the imported dataset checksum `dbf4a9c0fea6ddea244a37ef5e6b21901b4fc714826f3f18666162a4cb687eaf`:
+
+```text
+Employees:                              50,000
+Initial evaluation rules:                  300
+Mutations verified:                    100,000
+Validation batches:                        227
+Oracle assignment-scope comparisons: 8,675,538
+
+Assignment mismatches:                       0
+Impact false negatives:                      0
+SINGLE-cardinality violations:               0
+Determinism failures:                        0
+Idempotency failures:                        0
+Duplicate active assignments:                0
+Tenant-isolation failures:                   0
+
+Reconciliation p50:                  46.199 ms
+Reconciliation p95:                 582.728 ms
+Reconciliation p99:                  733.56 ms
+Localized mutation throughput:        45.784/s
+Affected-scope throughput:             316.76/s
+Large rule-change p95:             36,629.193 ms
+Temporal transition:                3,817.65 ms
+Rules actually evaluated:          33,550,536
+Equivalent full-rule evaluations: 421,438,330
+Rule-evaluation work avoided:          92.039%
+Mutation runtime:                    2,779.814 s
+Total evaluation runtime:             3,251.56 s
+```
+
+The runner measured 8, 12, and 16 workers locally and selected 12 (`643.343`, `950.057`, and `858.103` calibration scopes/second respectively). Reconciliation percentiles exclude deterministic setup, import, baseline materialization, calibration, and oracle time. The mutation runtime includes API writes, production job draining, oracle comparisons, and per-batch invariant checks. Four rule-create mutations intentionally leave 304 rules at the end; the certified starting universe contains 300.
+
+Useful options:
+
+```bash
+npm run eval:regression -- --seed=482901 --mutations=1000 --allow-small # non-certifying smoke run
+npm run eval:regression -- --seed=482901 --reuse-prepared              # resume an interrupted pristine baseline
+```
+
+`--reuse-prepared` is guarded: it only requeues the baseline FULL job when the imported source universe still has version 1 facts, zero manual controls, the expected 300 rules, and no unrelated active jobs. Once mutations have begun, a deterministic rebuild is required. Evaluation tenants are excluded from unscoped production workers; the runner's company-scoped worker is the only process that claims their jobs.
 
 ## Rule representation
 
@@ -122,7 +180,7 @@ All tenant data routes require `X-Company-Id`.
 ```bash
 curl -X POST http://localhost:3000/companies \
   -H 'content-type: application/json' \
-  -d '{"name":"Acme"}'
+  -d '{"name":"YOUR_COMPANY_NAME"}'
 
 curl http://localhost:3000/employees/EMPLOYEE_UUID/assignments \
   -H 'X-Company-Id: COMPANY_UUID'
@@ -135,33 +193,16 @@ The complete workflow and endpoint list are in [docs/API.md](docs/API.md).
 
 ## Correctness evidence
 
-The current suite contains 20 focused tests. The randomized harness runs **100 deterministic scenarios**, each with **30–60 mutations** across employee fields, groups, rule priority/state, overrides, and time. After every mutation it compares dependency-scoped materialization to an independently implemented full interpreter/resolver, then repeats the same scope to prove retry idempotency.
+The current suite contains 30 focused tests. The in-memory randomized harness runs **100 deterministic scenarios**, each with **30–60 mutations** across employee fields, groups, rule priority/state, overrides, and time. After every mutation it compares dependency-scoped materialization to an independently implemented full interpreter/resolver, then repeats the same scope to prove retry idempotency. The PostgreSQL regression command above supplies the separate 50,000-employee/100,000-mutation evidence.
 
 The PostgreSQL suite covers exact preview, manual precedence, rejected-candidate explanations, effective-dated history stability, group impact, tenant isolation, concurrent reconciliation serialization, duplicate retry safety, and a persisted tenure transition with no source-row mutation.
 
 Latest verified command:
 
 ```text
-Test Files  5 passed (5)
-Tests       20 passed (20)
+Test Files  9 passed (9)
+Tests       30 passed (30)
 ```
-
-## Measured performance
-
-Measured on Node v24.11.0, Apple arm64, with compiled rules warm:
-
-| Employees | Rules | Full evaluations | Full recompute | Incremental rules | Incremental p95 |
-|---:|---:|---:|---:|---:|---:|
-| 1,000 | 100 | 100,000 | 177.265 ms | 10 | 0.020 ms |
-| 10,000 | 1,000 | 10,000,000 | 14,127.781 ms | 100 | 0.278 ms |
-| 100,000 | 100 | 10,000,000 | 16,570.233 ms | 10 | 0.016 ms |
-| 1,000 | 5,000 | 5,000,000 | 7,145.115 ms | 500 | 0.794 ms |
-
-Fifty real, idempotent PostgreSQL employee/category reconciliations measured **3.185 ms p50**, **4.922 ms p95**, and **25.970 ms p99**. These are local wall-clock observations, not capacity claims. Run `npm run benchmark` on the review machine for comparable results and full JSON metadata.
-
-## Demo scenario
-
-`npm run seed` creates five employees, engineering/sales groups, five categories, eight policies, eight generic rules, an approaching-tenure transition, a PTO conflict, and a manual payroll exception. It drains the initial full reconciliation before returning and is idempotent by demo company name.
 
 ## Operational notes
 

@@ -18,12 +18,14 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:migrate:start": "node dist/scripts/migrate.js",
     "db:reset": "tsx scripts/reset-db.ts",
-    "seed": "tsx scripts/seed.ts",
+    "data:nyc": "tsx scripts/import-nyc.ts",
+    "data:nyc:start": "node dist/scripts/import-nyc.js",
+    "eval:regression": "tsx scripts/run-regression-eval.ts",
+    "eval:regression:start": "node dist/scripts/run-regression-eval.js",
     "test": "vitest run --exclude tests/integration/**",
     "test:watch": "vitest",
     "test:integration": "vitest run tests/integration --pool=forks --poolOptions.forks.singleFork=true",
     "test:all": "vitest run --pool=forks --poolOptions.forks.singleFork=true",
-    "benchmark": "tsx benchmarks/engine.bench.ts",
     "validate": "npm run lint && npm run typecheck && npm run test:all && npm run build"
   },
   "dependencies": {

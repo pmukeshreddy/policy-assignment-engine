@@ -46,6 +46,10 @@ erDiagram
   assignment_decisions ||--o{ assignment_history : explains
   employees ||--o{ scheduled_evaluations : awaits
   companies ||--o{ reconciliation_jobs : outbox
+  companies ||--o{ dataset_imports : records
+  dataset_imports ||--o{ employee_import_records : proves
+  employees ||--o| employee_import_records : maps
+  companies ||--o| evaluation_tenants : isolates
 ```
 
 Core facts remain relational. Extensible employee values, the rule AST, snapshots, traces, and candidate sets are JSONB because their shape is deliberately extensible. Every cross-tenant relationship uses `(company_id, id)` foreign keys, so a valid UUID from another company still fails.
@@ -108,6 +112,8 @@ For an `(employee_id, category_id, as_of_date)` scope:
 
 `slot_key` is category ID for `SINGLE` and policy ID for `MULTIPLE`; a unique `(company, employee, slot_key)` index provides a database backstop against two single-cardinality winners.
 
+The worker loads a job's snapshots, rules, categories, and controls in bounded sets, then reconciles up to 500 scopes per short transaction. Advisory locks are acquired in stable employee/category order. Decisions, current rows, removals, additions, history, and temporal schedules use `jsonb_to_recordset` set operations instead of per-scope SQL. A failed batch rolls back atomically; replay safely reuses decision fingerprints and diffs against committed materialization.
+
 ## 9. Impact analysis
 
 `rule_dependencies` indexes every fact/group/time dependency. The impact strategy is conservative: it may include extra work but must never omit an employee who can change.
@@ -161,6 +167,7 @@ Important access paths include:
 - active rule versions by company/date and rule dependencies by `(company, type, key)`;
 - active overrides by employee/date;
 - materialized reads by `(company, employee, category)`;
+- foreign-key support indexes from materialized assignments to decisions and from decisions to employee versions, preventing retention/reset cascades from degrading into repeated scans;
 - explanation decisions by `(company, employee, category, as_of_date DESC)`;
 - partial job claim and due-schedule indexes.
 
@@ -174,15 +181,23 @@ Assignment writes use a transaction-scoped advisory lock per employee/category, 
 
 ## 16. Scaling strategy
 
-The first scaling lever is less work: dependency-to-category impact, mandatory rule selectors, compiled rules, materialized reads, and batched preview. Independent jobs run with bounded worker concurrency; PostgreSQL coordinates claims and per-scope serialization. Stateless API/worker replicas can be added against one primary PostgreSQL database.
+The first scaling lever is less work: dependency-to-category impact, mandatory rule selectors, compiled rules, materialized reads, and batched preview. Independent jobs run with bounded worker concurrency; PostgreSQL coordinates claims and per-scope serialization. Stateless API/worker replicas can be added against one primary PostgreSQL database. Dedicated evaluation tenants are excluded from unscoped production job claims; a company-scoped evaluation worker exercises the same implementation without racing the normal worker fleet.
 
-For much larger tenants, rule-impact scopes can be emitted as bounded child jobs and historical decision JSON can be time-partitioned without changing domain semantics. The current single job streams its scope loop serially and heartbeats; it is intentionally simpler for this challenge and safe for the demonstrated 100k population.
+For much larger tenants, rule-impact scopes can be emitted as bounded child jobs and historical decision JSON can be time-partitioned without changing domain semantics. The current job bounds its database transactions to 500 scopes and heartbeats between batches, preserving retry safety without one transaction per employee/category.
 
-## 17. Measured performance
+## 17. Regression evaluation and performance characteristics
 
-The reproducible benchmark uses the real compiled `PolicyEvaluator` and conflict resolver. It covers 1k, 10k, and 100k employees and 100, 1k, and 5k rules. Full results and methodology are in [benchmark-results/latest.md](../benchmark-results/latest.md).
+The NYC importer fetches exactly 50,000 validated records from dataset `k397-673e`, discards names, and persists normalized facts plus query/fetch/checksum provenance. The offline regression runner builds 300 deterministic evaluation-only rules from observed distributions, establishes materialization through the normal FULL job, and compares it to an independent exhaustive interpreter before mutation testing begins.
 
-The measured location mutation reduced rules evaluated by 90% in every synthetic scenario because one of ten dependency-homogeneous categories was affected. This is workload-specific evidence, not a universal ratio. Fifty real PostgreSQL transactions measured 3.185 ms p50 and 4.922 ms p95 locally.
+At least 100,000 deterministic API mutations then exercise employee facts, tenure/date movement, groups, rules and versions, policy versions, manual assignment/exclusion/revocation, and duplicate job delivery. Ordinary checkpoints recompute every rule for affected employees in the oracle; global and temporal checkpoints compare all 50,000 employees. The report separates correctness counters from measured job latency and rule-evaluation work.
+
+The production path records affected scopes and evaluation counts. Human-readable and machine-readable summaries are generated under `eval-results/`; the latest certified summaries are committed, while large per-batch replay ledgers and failure artifacts remain local. No 50,000-row dump or fabricated benchmark artifact is stored in Git. Performance work is concentrated in dependency filtering, category scopes, immutable compiled-rule caching, per-job bulk loads, 500-scope set-based reconciliation transactions, indexed SQL paths, temporal-job coalescing, and bounded worker concurrency.
+
+The certified 2026-08-31 run used seed `482901`, the 50,000-row import with SHA-256 checksum `dbf4a9c0fea6ddea244a37ef5e6b21901b4fc714826f3f18666162a4cb687eaf`, and an initial 300-rule universe. It verified 100,000 mutations in 201 localized batches and 26 singleton global batches. The independent oracle compared 8,675,538 employee/category assignment sets. Assignment mismatches, impact false negatives, single-cardinality violations, determinism failures, idempotency failures, duplicate active assignments, and tenant-isolation failures were all zero.
+
+Measured reconciliation-job latency was 46.199 ms p50, 582.728 ms p95, and 733.56 ms p99. Localized mutation throughput was 45.784 mutations/second and affected-scope throughput was 316.76 scopes/second. Large rule changes completed in 36,629.193 ms at p95; the measured temporal transition completed in 3,817.65 ms. Incremental processing evaluated 33,550,536 rules versus 421,438,330 equivalent full-rule evaluations, avoiding 92.039% of evaluation work. Mutation verification took 2,779.814 seconds; the entire clean evaluation, including setup, baseline, concurrency calibration, and oracle work, took 3,251.56 seconds.
+
+Concurrency was selected from a measured local calibration: 8 workers processed 643.343 scopes/second, 12 processed 950.057, and 16 processed 858.103, so the certified run used 12. Reconciliation latency excludes deterministic setup/reset/import, baseline materialization, worker calibration, and oracle time. No NYC API request occurs during regression execution.
 
 ## 18. Known tradeoffs
 
@@ -190,6 +205,6 @@ The measured location mutation reduced rules evaluated by 90% in every synthetic
 - Mutation APIs reject backdated corrections after an identity exists; apply imports before the desired effective date. This avoids silently rewriting already-audited assignment history.
 - Exact preview intentionally refuses populations over its configured bound; it does not sample or estimate.
 - Rule impact without a logically mandatory selector scans the company's employees. This is required for correctness with `OR`, `NOT`, and pure time rules.
-- Rule-impact employee IDs are currently held in memory for one job. The tested 100k scale is practical; multi-million-employee tenants should page them into child jobs.
+- Rule-impact employee IDs are currently held in memory for one job. Very large tenants should page them into child jobs.
 - The admin UI is deliberately compact and its visual builder creates one comparison at a time. The API accepts the complete nested AST.
 - Authentication is outside this submission's scope. Deploy behind an authenticated admin gateway that supplies an authorized company ID; the header alone is not proof of identity.
