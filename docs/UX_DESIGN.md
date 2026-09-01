@@ -66,7 +66,7 @@ The engine's differentiator is not CRUD volume; it is trustworthy consequences. 
 
 ## Product workspace and journey
 
-`npm run seed:product` creates **NYC Open Data Policy Workspace** from the 50,000 normalized source facts already persisted by the NYC importer. It never calls the NYC API. The copy has product-owned employee identities, versions, import provenance, assignments, and jobs, while the source evaluation tenant and certified results remain isolated. Imported identities remain anonymized and are presented through job title, agency/location context, and a stable record label.
+`npm run seed:product` creates **NYC Open Data Policy Workspace** from the 50,000 normalized source facts already persisted by the NYC importer. It never calls the NYC API. The copy has product-owned employee versions, import provenance, assignments, and jobs, while the source evaluation tenant and certified results remain isolated. The importer explicitly preserves the Citywide Payroll `First Name`, `Last Name`, and `Mid Init` fields. Imported people display those source names, while job title, agency, location, and stable audit record ID remain separate fields. `npm run seed:product:refresh-nyc` is the explicit network-enabled refresh path for replacing only the editable product workspace from the same dataset.
 
 The policies, groups, and rules are visibly labelled **Evaluation / demonstration policy configuration** because they are not official NYC policies. They are the exact 6-category, 48-policy, 300-rule starting configuration used by the certified evaluation; the product does not substitute a smaller rule universe.
 
@@ -75,7 +75,7 @@ The intended walkthrough is:
 ```text
 Policies → understand assignable outcomes and category behavior
 Rules → inspect English-like conditions and preview impact
-Employees → open an imported NYC record and inspect current policies
+Employees → open a real imported employee and inspect current policies
 Why → inspect matching facts, competitors, and precedence
 Edit employee → preview a fact or membership change before saving a new product-tenant version
 Add employee → preview resolved policies before creation

@@ -93,7 +93,7 @@ npm run data:nyc
 npm run eval:regression -- --seed=482901
 ```
 
-`data:nyc` performs the network operation. It discovers the latest fiscal year, pages the Socrata endpoint, validates every row, and continues until exactly 50,000 usable records have been imported. `NYC_APP_TOKEN` is optional. Names are discarded; stable opaque employee IDs are derived from the dataset ID and Socrata row identity. Agency, agency start date, borough, title, pay basis, leave status, payroll number, fiscal year, and numeric pay facts are normalized into the production employee/version schema.
+`data:nyc` performs the network operation. It discovers the latest fiscal year, pages the Socrata endpoint, validates every row, and continues until exactly 50,000 usable records have been imported. `NYC_APP_TOKEN` is optional. Public `First Name`, `Last Name`, and `Mid Init` values are imported explicitly as display/search fields. Stable opaque employee IDs remain derived from the dataset ID and Socrata row identity, so names are never used for identity or deduplication. Agency, agency start date, borough, title, pay basis, leave status, payroll number, fiscal year, and numeric pay facts are normalized into the production employee/version schema.
 
 The import records its source URL, exact SoQL query, fetch time, counts, skip reasons, dataset/fiscal-year metadata, and SHA-256 checksum in `dataset_imports`. Per-employee provenance is retained in `employee_import_records`. No downloaded JSON or imported employee records are committed to Git.
 
@@ -148,7 +148,7 @@ npm run eval:regression -- --seed=482901 --reuse-prepared              # resume 
 
 `--reuse-prepared` is guarded: it only requeues the baseline FULL job when the imported source universe still has version 1 facts, zero manual controls, the expected 300 rules, and no unrelated active jobs. Once mutations have begun, a deterministic rebuild is required. Evaluation tenants are excluded from unscoped production workers; the runner's company-scoped worker is the only process that claims their jobs.
 
-Evaluation tenants are excluded from `GET /companies`. `npm run seed:product` creates a separate editable product tenant from the immutable `employee_import_records.normalized_facts` baseline, copies provenance into a product-owned import record, and invokes the same `createCertifiedBaseline()` implementation used by evaluation setup. It then drains one full reconciliation job. Existing product edits are never overwritten. Normal employee edits create new versions only in the product tenant.
+Evaluation tenants are excluded from `GET /companies`. `npm run seed:product` creates a separate editable product tenant from the immutable `employee_import_records.normalized_facts` baseline, copies provenance into a product-owned import record, and invokes the same `createCertifiedBaseline()` implementation used by evaluation setup. It then drains one full reconciliation job. Existing product edits are never overwritten. Normal employee edits create new versions only in the product tenant. `npm run seed:product:refresh-nyc` is the deliberate network operation that fetches the same official dataset with the source name fields and transactionally replaces only the editable product tenant; it does not reset or mutate the certified evaluation tenant.
 
 ## Rule representation
 

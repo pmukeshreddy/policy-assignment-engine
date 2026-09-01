@@ -238,10 +238,14 @@ async function resetSourceState(client: DbClient, companyId: string, importId: s
   await client.query('DELETE FROM employee_versions WHERE company_id = $1', [companyId]);
   await client.query(
     `INSERT INTO employee_versions
-       (company_id, employee_id, version, valid_from, display_name, location, department,
-        employment_type, is_manager, hire_date, attributes, changed_fields, created_by)
+       (company_id, employee_id, version, valid_from, display_name, first_name, last_name,
+        middle_initial, location, department, employment_type, is_manager, hire_date,
+        attributes, changed_fields, created_by)
      SELECT $1, records.employee_id, 1, $2::date,
             records.normalized_facts ->> 'displayName',
+            records.normalized_facts ->> 'firstName',
+            records.normalized_facts ->> 'lastName',
+            records.normalized_facts ->> 'middleInitial',
             records.normalized_facts ->> 'location',
             records.normalized_facts ->> 'department',
             records.normalized_facts ->> 'employmentType', false,

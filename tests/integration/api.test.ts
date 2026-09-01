@@ -51,7 +51,7 @@ describe('PostgreSQL API, reconciliation, and history', () => {
       key: 'enhanced', categoryId: category.id, name: 'Enhanced PTO', effectiveFrom: '2026-08-01',
     });
     const employee = await request('POST', '/employees', {
-      externalId: 'E-100', displayName: 'Integration Employee', location: 'CA', department: 'Engineering',
+      externalId: 'E-100', displayName: 'Integration A Employee', location: 'CA', department: 'Engineering',
       employmentType: 'full_time', hireDate: '2024-01-01', attributes: { country: 'US', employment_status: 'ACTIVE' }, effectiveFrom: '2026-08-01',
     });
     await request('POST', '/rules', {
@@ -80,11 +80,15 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     expect(why.decision.winningCandidate.ruleVersionId).toBe(enhancedRule.versionId);
     expect(why.decision.competingCandidates[0].reason).toMatch(/higher priority/);
     expect(why.decision.competingCandidates[0].candidate.policyName).toBe('Standard PTO');
+    expect(why.employee).toMatchObject({
+      identity_label: 'Integration A Employee',
+      record_label: 'Employee ID E-100',
+    });
     expect(why.employeeSnapshot.location).toBe('CA');
 
     const employeeChangePreview = await request('POST', '/employees/preview', {
       employeeId: employee.id,
-      displayName: 'Integration Employee',
+      displayName: 'Integration A Employee',
       location: 'NY',
       department: 'Engineering',
       employmentType: 'full_time',
@@ -110,11 +114,15 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     expect(employeeList.facets.employment_statuses).toContain('ACTIVE');
     expect(employeeList.data[0].policy_count).toBe(1);
     expect(employeeList.data[0]).toMatchObject({
-      display_label: 'Integration Employee',
+      identity_label: 'Integration A Employee',
+      display_label: 'Integration A Employee',
       context_label: 'Engineering · CA',
       record_label: 'Employee ID E-100',
       is_anonymized: false,
     });
+    const firstLastNameSearch = await request('GET', '/employees?search=Integration%20Employee&facets=false&limit=10');
+    expect(firstLastNameSearch.meta.total).toBe(1);
+    expect(firstLastNameSearch.data[0].identity_label).toBe('Integration A Employee');
     const ruleList = await request(
       'GET',
       `/rules?search=enhanced&categoryId=${category.id}&dependency=FIELD%3Alocation&status=PUBLISHED&limit=1&offset=0`,

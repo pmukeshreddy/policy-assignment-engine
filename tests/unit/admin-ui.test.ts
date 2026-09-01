@@ -44,10 +44,14 @@ describe('production admin application', () => {
 
     expect(script).toContain('real NYC Open Data employee facts');
     expect(script).toContain('Evaluation / demonstration policy configuration');
-    expect(script).toContain('employee?.display_label');
-    expect(script).toContain('Search record ID, job title, agency, or location');
-    expect(script).toContain('No person name is stored or generated');
+    expect(script).toContain('employee?.identity_label');
+    expect(script).toContain('Search name, record ID, job title, agency, or location');
+    expect(script).toContain('<th>Job title</th>');
+    expect(script).toContain('job_title_label');
+    expect(script).toContain('Employee name');
+    expect(script).toContain('Original provenance remains immutable');
     expect(script).not.toContain('NYC record');
+    expect(script).not.toContain("values.jobTitle || 'Employee'");
     expect(script).toContain("facet('status', result.facets.employment_statuses");
     expect(api).toContain('WITH page AS MATERIALIZED');
     expect(api).toContain('policy_counts AS');

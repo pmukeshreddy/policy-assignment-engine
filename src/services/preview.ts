@@ -17,6 +17,9 @@ interface EmployeeRow {
   version_id: string;
   external_id: string;
   display_name: string;
+  first_name: string | null;
+  last_name: string | null;
+  middle_initial: string | null;
   email: string | null;
   location: string | null;
   department: string | null;
@@ -50,7 +53,10 @@ export interface PreviewResult {
   unchangedEmployees: number;
   examples: Array<{
     employeeId: string;
-    displayName: string;
+    identityLabel: string;
+    jobTitleLabel: string | null;
+    departmentLabel: string | null;
+    locationLabel: string | null;
     contextLabel: string;
     recordLabel: string;
     beforePolicyIds: string[];
@@ -432,6 +438,7 @@ export class PreviewService {
     const [employeeResult, overrideResult] = await Promise.all([
       this.pool.query<EmployeeRow>(
         `SELECT e.id, e.company_id, ev.id AS version_id, e.external_id, ev.display_name,
+                ev.first_name, ev.last_name, ev.middle_initial,
                 ev.email, ev.location, ev.department, ev.employment_type, ev.is_manager,
                 ev.hire_date::text, ev.attributes,
                 imported.employee_id IS NOT NULL AS is_imported,
@@ -527,7 +534,10 @@ export class PreviewService {
         const presentation = employeePresentation(row);
         input.totals.examples.push({
           employeeId: row.id,
-          displayName: presentation.display_label,
+          identityLabel: presentation.identity_label,
+          jobTitleLabel: presentation.job_title_label,
+          departmentLabel: presentation.department_label,
+          locationLabel: presentation.location_label,
           contextLabel: presentation.context_label,
           recordLabel: presentation.record_label,
           beforePolicyIds: before,

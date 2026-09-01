@@ -31,6 +31,9 @@ function presentEmployeeReference(row: Record<string, unknown>): Record<string, 
   const {
     employee_external_id: externalId,
     employee_display_name: displayName,
+    employee_first_name: firstName,
+    employee_last_name: lastName,
+    employee_middle_initial: middleInitial,
     employee_department: department,
     employee_location: location,
     employee_attributes: attributes,
@@ -41,6 +44,9 @@ function presentEmployeeReference(row: Record<string, unknown>): Record<string, 
   const presentation = employeePresentation({
     external_id: externalId,
     display_name: displayName,
+    first_name: typeof firstName === 'string' ? firstName : null,
+    last_name: typeof lastName === 'string' ? lastName : null,
+    middle_initial: typeof middleInitial === 'string' ? middleInitial : null,
     department: typeof department === 'string' ? department : null,
     location: typeof location === 'string' ? location : null,
     attributes: typeof attributes === 'object' && attributes !== null ? attributes as Record<string, unknown> : {},
@@ -48,7 +54,8 @@ function presentEmployeeReference(row: Record<string, unknown>): Record<string, 
   });
   return {
     ...rest,
-    employee_name: presentation.display_label,
+    employee_name: presentation.identity_label,
+    employee_job_title: presentation.job_title_label,
     employee_context: presentation.context_label,
     employee_record_label: presentation.record_label,
     employee_is_anonymized: presentation.is_anonymized,
@@ -238,6 +245,9 @@ export function buildApp(input: {
         `SELECT current.id, current.created_at AS occurred_at, e.id AS employee_id,
                 e.external_id AS employee_external_id,
                 current.display_name AS employee_display_name,
+                current.first_name AS employee_first_name,
+                current.last_name AS employee_last_name,
+                current.middle_initial AS employee_middle_initial,
                 current.department AS employee_department,
                 current.location AS employee_location,
                 current.attributes AS employee_attributes,
@@ -317,6 +327,9 @@ export function buildApp(input: {
          SELECT ordered.id, ordered.decided_at AS occurred_at, ordered.employee_id,
                 e.external_id AS employee_external_id,
                 ev.display_name AS employee_display_name,
+                ev.first_name AS employee_first_name,
+                ev.last_name AS employee_last_name,
+                ev.middle_initial AS employee_middle_initial,
                 ev.department AS employee_department,
                 ev.location AS employee_location,
                 ev.attributes AS employee_attributes,
@@ -360,6 +373,9 @@ export function buildApp(input: {
         `SELECT mo.id, COALESCE(mo.revoked_at, mo.created_at) AS occurred_at,
                 mo.employee_id, e.external_id AS employee_external_id,
                 ev.display_name AS employee_display_name,
+                ev.first_name AS employee_first_name,
+                ev.last_name AS employee_last_name,
+                ev.middle_initial AS employee_middle_initial,
                 ev.department AS employee_department,
                 ev.location AS employee_location,
                 ev.attributes AS employee_attributes,
@@ -463,6 +479,9 @@ async function loadActivity(pool: DbPool, companyId: string, limit: number): Pro
             COALESCE(r.key, pv.name, g.name) AS non_employee_entity_name,
             e.external_id AS employee_external_id,
             ev.display_name AS employee_display_name,
+            ev.first_name AS employee_first_name,
+            ev.last_name AS employee_last_name,
+            ev.middle_initial AS employee_middle_initial,
             ev.department AS employee_department,
             ev.location AS employee_location,
             ev.attributes AS employee_attributes,
@@ -591,12 +610,7 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       limit: z.coerce.number().int().min(1).max(1_000).default(100),
       offset: z.coerce.number().int().min(0).default(0),
     }).parse(request.query);
-    const productWorkspace = query.sort === 'name'
-      ? await pool.query('SELECT 1 FROM product_workspaces WHERE company_id = $1', [companyId])
-      : { rowCount: 0 };
-    const nameSort = productWorkspace.rowCount === 1
-      ? `COALESCE(NULLIF(ev.attributes ->> 'job_title', ''), 'Employee')`
-      : 'ev.display_name';
+    const nameSort = 'ev.display_name';
     const sortColumns = {
       name: [nameSort, 'page.display_sort'],
       department: ['ev.department', 'page.department'],
@@ -607,10 +621,13 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
     const direction = query.direction === 'desc' ? 'DESC' : 'ASC';
     const order = `${sortColumns[query.sort][0]} ${direction} NULLS LAST, e.id`;
     const pageOrder = `${sortColumns[query.sort][1]} ${direction} NULLS LAST, page.id`;
+    const search = query.search?.trim() || null;
+    const identitySearch = search?.replace(/^(?:employee|record)\s+/i, '').replace(/^nyc-/i, '') || null;
     const parameters = [
       companyId,
       todayUtc(clock),
-      query.search?.trim() || null,
+      search,
+      identitySearch,
       query.department ?? null,
       query.location ?? null,
       query.employmentType ?? null,
@@ -621,7 +638,8 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       pool.query(
       `WITH page AS MATERIALIZED (
          SELECT e.id, e.external_id, ev.id AS version_id, ev.version, ev.valid_from,
-                ev.display_name, ev.email, ev.location, ev.department, ev.employment_type,
+                ev.display_name, ev.first_name, ev.last_name, ev.middle_initial,
+                ev.email, ev.location, ev.department, ev.employment_type,
                 ev.is_manager, ev.hire_date, ev.attributes, e.updated_at AS last_changed,
                 imported.employee_id IS NOT NULL AS is_imported,
                 ${nameSort} AS display_sort
@@ -632,18 +650,23 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
              ON imported.company_id = e.company_id AND imported.employee_id = e.id
           WHERE e.company_id = $1
             AND ($3::text IS NULL OR lower(ev.display_name) LIKE '%' || lower($3) || '%'
+              OR NOT EXISTS (
+                SELECT FROM regexp_split_to_table(trim($3), '\\s+') AS name_part(part)
+                 WHERE lower(ev.display_name) NOT LIKE '%' || lower(name_part.part) || '%'
+              )
               OR lower(e.external_id) LIKE '%' || lower($3) || '%'
+              OR lower(e.external_id) LIKE '%' || lower($4) || '%'
               OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%'
               OR lower(COALESCE(ev.attributes ->> 'job_title', '')) LIKE '%' || lower($3) || '%'
               OR lower(COALESCE(ev.department, '')) LIKE '%' || lower($3) || '%'
               OR lower(COALESCE(ev.location, '')) LIKE '%' || lower($3) || '%')
-            AND ($4::text IS NULL OR ev.department = $4)
-            AND ($5::text IS NULL OR ev.location = $5)
-            AND ($6::text IS NULL OR ev.employment_type = $6)
-            AND ($7::text IS NULL OR ev.attributes ->> 'employment_status' = $7)
-            AND ($8::boolean IS NULL OR ev.is_manager = $8)
+            AND ($5::text IS NULL OR ev.department = $5)
+            AND ($6::text IS NULL OR ev.location = $6)
+            AND ($7::text IS NULL OR ev.employment_type = $7)
+            AND ($8::text IS NULL OR ev.attributes ->> 'employment_status' = $8)
+            AND ($9::boolean IS NULL OR ev.is_manager = $9)
           ORDER BY ${order}
-          LIMIT $9 OFFSET $10
+          LIMIT $10 OFFSET $11
        ), policy_counts AS (
          SELECT assignments.employee_id, count(*)::int AS policy_count
            FROM materialized_assignments assignments
@@ -652,7 +675,8 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
           GROUP BY assignments.employee_id
        )
        SELECT page.id, page.external_id, page.version_id, page.version, page.valid_from,
-              page.display_name, page.email, page.location, page.department, page.employment_type,
+              page.display_name, page.first_name, page.last_name, page.middle_initial,
+              page.email, page.location, page.department, page.employment_type,
               page.is_manager, page.hire_date, page.attributes, page.last_changed,
               page.is_imported, COALESCE(policy_counts.policy_count, 0) AS policy_count
          FROM page
@@ -667,16 +691,21 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
             AND ev.valid_from <= $2::date AND (ev.valid_to IS NULL OR ev.valid_to > $2::date)
           WHERE e.company_id = $1
             AND ($3::text IS NULL OR lower(ev.display_name) LIKE '%' || lower($3) || '%'
+              OR NOT EXISTS (
+                SELECT FROM regexp_split_to_table(trim($3), '\\s+') AS name_part(part)
+                 WHERE lower(ev.display_name) NOT LIKE '%' || lower(name_part.part) || '%'
+              )
               OR lower(e.external_id) LIKE '%' || lower($3) || '%'
+              OR lower(e.external_id) LIKE '%' || lower($4) || '%'
               OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%'
               OR lower(COALESCE(ev.attributes ->> 'job_title', '')) LIKE '%' || lower($3) || '%'
               OR lower(COALESCE(ev.department, '')) LIKE '%' || lower($3) || '%'
               OR lower(COALESCE(ev.location, '')) LIKE '%' || lower($3) || '%')
-            AND ($4::text IS NULL OR ev.department = $4)
-            AND ($5::text IS NULL OR ev.location = $5)
-            AND ($6::text IS NULL OR ev.employment_type = $6)
-            AND ($7::text IS NULL OR ev.attributes ->> 'employment_status' = $7)
-            AND ($8::boolean IS NULL OR ev.is_manager = $8)`,
+            AND ($5::text IS NULL OR ev.department = $5)
+            AND ($6::text IS NULL OR ev.location = $6)
+            AND ($7::text IS NULL OR ev.employment_type = $7)
+            AND ($8::text IS NULL OR ev.attributes ->> 'employment_status' = $8)
+            AND ($9::boolean IS NULL OR ev.is_manager = $9)`,
         parameters,
       ),
       query.facets === 'false' ? Promise.resolve({ rows: [] }) : pool.query<{
@@ -711,7 +740,8 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
     const employeeId = idParam(request);
     const result = await pool.query(
       `SELECT e.id, e.external_id, ev.id AS version_id, ev.version, ev.valid_from,
-              ev.display_name, ev.email, ev.location, ev.department, ev.employment_type,
+              ev.display_name, ev.first_name, ev.last_name, ev.middle_initial,
+              ev.email, ev.location, ev.department, ev.employment_type,
               ev.is_manager, ev.hire_date, ev.attributes,
               imported.employee_id IS NOT NULL AS is_imported,
               COALESCE(jsonb_agg(jsonb_build_object('id', g.id, 'key', g.slug, 'name', g.name) ORDER BY g.name)
@@ -806,10 +836,12 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
     return inTransaction(pool, async (client) => {
       const current = await client.query<{
         external_id: string; version_id: string; version: number; valid_from: string; display_name: string;
+        first_name: string | null; last_name: string | null; middle_initial: string | null;
         email: string | null; location: string | null; department: string | null; employment_type: string | null;
         is_manager: boolean; hire_date: string | null; attributes: Record<string, unknown>;
       }>(
         `SELECT e.external_id, ev.id AS version_id, ev.version, ev.valid_from::text, ev.display_name,
+                ev.first_name, ev.last_name, ev.middle_initial,
                 ev.email, ev.location, ev.department, ev.employment_type, ev.is_manager,
                 ev.hire_date::text, ev.attributes
            FROM employees e
@@ -867,12 +899,14 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
         ]);
         const version = await client.query<{ id: string }>(
           `INSERT INTO employee_versions
-             (company_id, employee_id, version, valid_from, display_name, email, location, department,
-              employment_type, is_manager, hire_date, attributes, changed_fields)
-           VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11::date, $12::jsonb, $13)
+             (company_id, employee_id, version, valid_from, display_name, first_name, last_name,
+              middle_initial, email, location, department, employment_type, is_manager, hire_date,
+              attributes, changed_fields)
+           VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::date, $15::jsonb, $16)
            RETURNING id`,
           [
-            companyId, employeeId, previous.version + 1, effectiveFrom, next.displayName, next.email,
+            companyId, employeeId, previous.version + 1, effectiveFrom, next.displayName,
+            previous.first_name, previous.last_name, previous.middle_initial, next.email,
             next.location, next.department, next.employmentType, next.isManager, next.hireDate,
             JSON.stringify(next.attributes), changedFields,
           ],
@@ -1011,7 +1045,8 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
     );
     if (group.rows[0] === undefined) throw notFound('Group');
     const [members, dependentRules] = await Promise.all([pool.query(
-      `SELECT e.id, e.external_id, ev.display_name, ev.department, ev.location, ev.attributes,
+      `SELECT e.id, e.external_id, ev.display_name, ev.first_name, ev.last_name, ev.middle_initial,
+              ev.department, ev.location, ev.attributes,
               imported.employee_id IS NOT NULL AS is_imported,
               gm.valid_from, count(*) OVER()::int AS total_count
          FROM group_memberships gm
@@ -1023,11 +1058,16 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
         WHERE gm.company_id = $1 AND gm.group_id = $2
           AND gm.valid_from <= $3::date AND (gm.valid_to IS NULL OR gm.valid_to > $3::date)
           AND ($4::text IS NULL OR ev.display_name ILIKE '%' || $4 || '%'
+            OR NOT EXISTS (
+              SELECT FROM regexp_split_to_table(trim($4), '\\s+') AS name_part(part)
+               WHERE ev.display_name NOT ILIKE '%' || name_part.part || '%'
+            )
             OR e.external_id ILIKE '%' || $4 || '%'
+            OR e.external_id ILIKE '%' || regexp_replace($4, '^(employee|record)\\s+', '', 'i') || '%'
             OR ev.attributes ->> 'job_title' ILIKE '%' || $4 || '%'
             OR ev.department ILIKE '%' || $4 || '%'
             OR ev.location ILIKE '%' || $4 || '%')
-        ORDER BY COALESCE(NULLIF(ev.attributes ->> 'job_title', ''), ev.display_name), e.id
+        ORDER BY ev.display_name, e.id
         LIMIT $5 OFFSET $6`,
       [companyId, groupId, todayUtc(clock), query.search?.trim() || null, query.limit, query.offset],
     ), pool.query(
@@ -1641,6 +1681,9 @@ function registerOverrideRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
     const result = await pool.query(
       `SELECT mo.id, mo.employee_id, e.external_id AS employee_external_id,
               ev.display_name AS employee_display_name,
+              ev.first_name AS employee_first_name,
+              ev.last_name AS employee_last_name,
+              ev.middle_initial AS employee_middle_initial,
               ev.department AS employee_department,
               ev.location AS employee_location,
               ev.attributes AS employee_attributes,
@@ -1829,6 +1872,18 @@ function registerAssignmentRoutes(app: FastifyInstance, pool: DbPool, clock: () 
         'SELECT id, key FROM rules WHERE company_id = $1 AND id = ANY($2::uuid[])',
         [companyId, ruleIds],
       );
+    const employeeDetails = await pool.query(
+      `SELECT e.external_id, ev.display_name, ev.first_name, ev.last_name, ev.middle_initial,
+              ev.department, ev.location, ev.attributes,
+              imported.employee_id IS NOT NULL AS is_imported
+         FROM employees e
+         JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.employee_id = e.id
+          AND ev.valid_from <= $3::date AND (ev.valid_to IS NULL OR ev.valid_to > $3::date)
+         LEFT JOIN employee_import_records imported
+           ON imported.company_id = e.company_id AND imported.employee_id = e.id
+        WHERE e.company_id = $1 AND e.id = $2`,
+      [companyId, employeeId, asOfDate],
+    );
     const policyById = new Map(policyDetails.rows.map((policy) => [policy.id, policy]));
     const ruleById = new Map(ruleDetails.rows.map((rule) => [rule.id, rule]));
     const enrichCandidate = (candidate: Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
@@ -1847,6 +1902,9 @@ function registerAssignmentRoutes(app: FastifyInstance, pool: DbPool, clock: () 
     }));
     return {
       assignment: { id: assignmentId, policyId: target.policy_id, policyKey: target.policy_key, policyName: target.policy_name },
+      employee: employeeDetails.rows[0] === undefined
+        ? null
+        : presentEmployee(employeeDetails.rows[0] as Parameters<typeof presentEmployee>[0]),
       asOfDate,
       decision: {
         id: record.id,

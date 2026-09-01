@@ -19,6 +19,7 @@
     "db:migrate:start": "node dist/scripts/migrate.js",
     "db:reset": "tsx scripts/reset-db.ts",
     "seed:product": "tsx scripts/seed-product.ts",
+    "seed:product:refresh-nyc": "tsx scripts/seed-product.ts --refresh-nyc",
     "seed:product:start": "node dist/scripts/seed-product.js",
     "data:nyc": "tsx scripts/import-nyc.ts",
     "data:nyc:start": "node dist/scripts/import-nyc.js",

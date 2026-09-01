@@ -6,7 +6,14 @@ import {
   certifiedBaselineSemantics,
   createCertifiedBaseline,
 } from '../src/baseline/certified-universe.js';
-import { NYC_DATASET_ID, NYC_EVALUATION_TENANT_KEY, NYC_IMPORT_COUNT } from '../src/eval/nyc.js';
+import {
+  fetchNycEmployees,
+  NYC_DATASET_ID,
+  NYC_EVALUATION_TENANT_KEY,
+  NYC_IMPORT_COUNT,
+  persistNycEmployeeImport,
+  type NycFetchResult,
+} from '../src/eval/nyc.js';
 import { enqueueJob } from '../src/services/jobs.js';
 import { ReconciliationWorker } from '../src/services/worker.js';
 
@@ -22,6 +29,7 @@ interface SourceImport {
 
 interface ProductWorkspace {
   company_id: string;
+  source_company_id: string;
   source_import_id: string;
   baseline_fingerprint: string | null;
 }
@@ -29,6 +37,7 @@ interface ProductWorkspace {
 const config = loadConfig();
 const pool = createPool(config);
 const lockClient = await pool.connect();
+const refreshNyc = process.argv.includes('--refresh-nyc');
 
 async function loadSourceImport(): Promise<SourceImport> {
   const result = await pool.query<SourceImport>(
@@ -66,7 +75,7 @@ async function loadSourceImport(): Promise<SourceImport> {
 
 async function findProductWorkspace(): Promise<ProductWorkspace | null> {
   const result = await pool.query<ProductWorkspace>(
-    `SELECT company_id, source_import_id, baseline_fingerprint
+    `SELECT company_id, source_company_id, source_import_id, baseline_fingerprint
        FROM product_workspaces
       WHERE dataset_id = $1
       ORDER BY created_at, company_id LIMIT 1`,
@@ -167,6 +176,70 @@ async function createProductWorkspace(source: SourceImport): Promise<string> {
   });
 }
 
+async function createRefreshedProductWorkspace(
+  fetched: NycFetchResult,
+  existingCompanyId: string | null,
+): Promise<string> {
+  return inTransaction(pool, async (client) => {
+    if (existingCompanyId !== null) await client.query('DELETE FROM companies WHERE id = $1', [existingCompanyId]);
+    await client.query(
+      `DELETE FROM companies legacy
+        WHERE legacy.name = 'Policy Assignment Demo'
+          AND NOT EXISTS (SELECT 1 FROM evaluation_tenants evaluation WHERE evaluation.company_id = legacy.id)`,
+    );
+    const conflicting = await client.query<{ id: string }>('SELECT id FROM companies WHERE name = $1 FOR UPDATE', [PRODUCT_WORKSPACE_NAME]);
+    if (conflicting.rowCount !== 0) throw new Error(`A company already uses the name ${PRODUCT_WORKSPACE_NAME}`);
+    const company = await client.query<{ id: string }>(
+      'INSERT INTO companies (name) VALUES ($1) RETURNING id', [PRODUCT_WORKSPACE_NAME],
+    );
+    const companyId = company.rows[0]!.id;
+    const persisted = await persistNycEmployeeImport(client, companyId, fetched, {
+      createdBy: 'nyc-open-data-product-baseline',
+      purpose: 'product-workspace-refresh',
+      enqueueReconciliation: false,
+    });
+    await client.query(
+      `INSERT INTO product_workspaces
+         (company_id, source_company_id, source_import_id, product_import_id,
+          dataset_id, imported_employee_count)
+       VALUES ($1, $1, $2, $2, $3, $4)`,
+      [companyId, persisted.importId, NYC_DATASET_ID, NYC_IMPORT_COUNT],
+    );
+    const baselineDate = `${fetched.fiscalYear}-06-30`;
+    const baseline = await createCertifiedBaseline(client, {
+      companyId,
+      baselineDate,
+      idNamespace: `product:${companyId}`,
+      createdBy: 'nyc-open-data-product-baseline',
+      ruleCount: CERTIFIED_RULE_COUNT,
+    });
+    const semantics = await certifiedBaselineSemantics(client, companyId);
+    await client.query(
+      `UPDATE product_workspaces
+          SET baseline_fingerprint = $2, baseline_rule_seed = $3,
+              baseline_rule_count = $4, baseline_created_at = now()
+        WHERE company_id = $1`,
+      [companyId, semantics.fingerprint, CERTIFIED_RULE_SEED, baseline.ruleCount],
+    );
+    await enqueueJob(client, {
+      companyId,
+      eventType: 'PRODUCT_BASELINE_INITIALIZED',
+      scope: 'FULL',
+      payload: {
+        datasetId: NYC_DATASET_ID,
+        sourceImportId: persisted.importId,
+        importedEmployees: NYC_IMPORT_COUNT,
+        semanticFingerprint: semantics.fingerprint,
+        ruleSeed: CERTIFIED_RULE_SEED,
+        ruleCount: baseline.ruleCount,
+      },
+      dedupeKey: `product-baseline:${persisted.importId}:${fetched.checksum}:${semantics.fingerprint}`,
+      priority: 100,
+    });
+    return companyId;
+  });
+}
+
 async function copyImportedEmployees(
   client: DbClient,
   companyId: string,
@@ -184,10 +257,14 @@ async function copyImportedEmployees(
   );
   await client.query(
     `INSERT INTO employee_versions
-       (company_id, employee_id, version, valid_from, display_name, location, department,
-        employment_type, is_manager, hire_date, attributes, changed_fields, created_by)
+       (company_id, employee_id, version, valid_from, display_name, first_name, last_name,
+        middle_initial, location, department, employment_type, is_manager, hire_date,
+        attributes, changed_fields, created_by)
      SELECT $1, employee.id, 1, $4::date,
             records.normalized_facts ->> 'displayName',
+            records.normalized_facts ->> 'firstName',
+            records.normalized_facts ->> 'lastName',
+            records.normalized_facts ->> 'middleInitial',
             records.normalized_facts ->> 'location',
             records.normalized_facts ->> 'department',
             records.normalized_facts ->> 'employmentType', false,
@@ -267,17 +344,32 @@ async function drainProductJobs(companyId: string): Promise<number> {
 
 try {
   await lockClient.query('SELECT pg_advisory_lock(hashtext($1))', ['nyc-product-workspace-seed']);
-  const source = await loadSourceImport();
+  const refreshed = refreshNyc
+    ? await fetchNycEmployees({
+      targetCount: NYC_IMPORT_COUNT,
+      pageSize: 5_000,
+      ...(process.env['NYC_APP_TOKEN'] === undefined ? {} : { appToken: process.env['NYC_APP_TOKEN'] }),
+    })
+    : null;
+  const source = refreshed === null ? await loadSourceImport() : null;
   let existing = await findProductWorkspace();
   if (existing !== null && existing.baseline_fingerprint === null) {
     await removeObsoleteWorkspace(existing.company_id);
     existing = null;
   }
   let companyId: string;
-  if (existing === null) {
+  if (refreshed !== null) {
+    process.stdout.write(
+      `Replacing the editable product workspace with ${refreshed.employees.length.toLocaleString()} refreshed NYC records; the certified evaluation tenant will not be modified.\n`,
+    );
+    companyId = await createRefreshedProductWorkspace(refreshed, existing?.company_id ?? null);
+  } else if (existing === null) {
+    if (source === null) throw new Error('NYC source import was not loaded');
     companyId = await createProductWorkspace(source);
   } else {
-    if (existing.source_import_id !== source.source_import_id) {
+    if (source === null) throw new Error('NYC source import was not loaded');
+    if (existing.source_company_id !== existing.company_id
+      && existing.source_import_id !== source.source_import_id) {
       throw new Error(`${PRODUCT_WORKSPACE_NAME} points to a different NYC source import; refusing to overwrite product edits`);
     }
     companyId = existing.company_id;

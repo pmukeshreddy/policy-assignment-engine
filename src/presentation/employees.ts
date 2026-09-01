@@ -1,6 +1,9 @@
 export interface EmployeePresentationSource {
   external_id: string;
   display_name: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  middle_initial?: string | null;
   department?: string | null;
   location?: string | null;
   attributes?: Record<string, unknown> | null;
@@ -8,7 +11,11 @@ export interface EmployeePresentationSource {
 }
 
 export interface EmployeePresentation {
+  identity_label: string;
   display_label: string;
+  job_title_label: string | null;
+  department_label: string | null;
+  location_label: string | null;
   context_label: string;
   record_label: string;
   is_anonymized: boolean;
@@ -56,17 +63,38 @@ export function employeePresentation(source: EmployeePresentationSource): Employ
   const imported = source.is_imported === true;
   const department = imported ? formatImportedFact(source.department) : text(source.department);
   const location = imported ? formatImportedFact(source.location) : text(source.location);
-  const contextLabel = [department, location].filter((value): value is string => value !== null).join(' · ');
+  const jobTitle = imported ? formatImportedFact(source.attributes?.['job_title']) : text(source.attributes?.['job_title']);
+  const contextLabel = [jobTitle, department, location].filter((value): value is string => value !== null).join(' · ');
   if (imported) {
+    const recordId = shortRecordId(source.external_id);
+    const firstName = formatImportedFact(source.first_name);
+    const lastName = formatImportedFact(source.last_name);
+    const middleInitial = formatImportedFact(source.middle_initial);
+    const storedName = text(source.display_name);
+    const importedDisplayName = storedName !== null && !/^(?:NYC record|Employee [A-F0-9]+|Record [A-F0-9]+)/i.test(storedName)
+      ? formatImportedFact(storedName)
+      : null;
+    const identityLabel = firstName !== null && lastName !== null
+      ? [firstName, middleInitial, lastName].filter((value): value is string => value !== null).join(' ')
+      : importedDisplayName ?? `Record ${recordId}`;
     return {
-      display_label: formatImportedFact(source.attributes?.['job_title']) ?? 'Employee',
+      identity_label: identityLabel,
+      display_label: identityLabel,
+      job_title_label: jobTitle,
+      department_label: department,
+      location_label: location,
       context_label: contextLabel,
-      record_label: `Record ${shortRecordId(source.external_id)}`,
-      is_anonymized: true,
+      record_label: `Record ${recordId}`,
+      is_anonymized: firstName === null && lastName === null && importedDisplayName === null,
     };
   }
+  const identityLabel = text(source.display_name) ?? 'Employee';
   return {
-    display_label: text(source.display_name) ?? 'Employee',
+    identity_label: identityLabel,
+    display_label: identityLabel,
+    job_title_label: jobTitle,
+    department_label: department,
+    location_label: location,
     context_label: contextLabel,
     record_label: `Employee ID ${source.external_id}`,
     is_anonymized: false,
@@ -74,5 +102,10 @@ export function employeePresentation(source: EmployeePresentationSource): Employ
 }
 
 export function presentEmployee<Row extends EmployeePresentationSource>(row: Row): Row & EmployeePresentation {
-  return { ...row, ...employeePresentation(row) };
+  const presentation = employeePresentation(row);
+  return {
+    ...row,
+    ...(row.is_imported === true ? { display_name: presentation.identity_label } : {}),
+    ...presentation,
+  };
 }

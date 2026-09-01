@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fetchNycEmployees, normalizeNycRow } from '../../src/eval/nyc.js';
 
 describe('NYC Open Data importer', () => {
-  it('normalizes required real fields and discards personal names', () => {
+  it('normalizes the real source name and employment fields without changing stable identity', () => {
     const result = normalizeNycRow(rawRow('row-1'));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -11,22 +11,33 @@ describe('NYC Open Data importer', () => {
       department: 'CITY AGENCY',
       employmentType: 'per Annum',
       hireDate: '2015-02-03',
+      displayName: 'ELMER J BLANCO',
+      firstName: 'ELMER',
+      lastName: 'BLANCO',
+      middleInitial: 'J',
     });
     expect(result.employee.externalId).toMatch(/^nyc-[a-f0-9]{40}$/);
-    expect(result.employee.displayName).toMatch(/^NYC record [a-f0-9]{12}$/);
     expect(result.employee.attributes).toMatchObject({
       job_title: 'PROGRAM ANALYST',
       employment_status: 'ACTIVE',
       pay_basis: 'per Annum',
       fiscal_year: 2025,
     });
-    expect(JSON.stringify(result.employee)).not.toContain('PERSON');
+    expect(JSON.stringify(result.employee)).toContain('ELMER');
   });
 
   it('rejects malformed rows with an explicit reason', () => {
     const row = rawRow('row-invalid');
     delete row['agency_start_date'];
     expect(normalizeNycRow(row)).toEqual({ ok: false, reason: 'invalid_agency_start_date' });
+  });
+
+  it('retains a source record without inventing a name when a public name is unavailable', () => {
+    const result = normalizeNycRow({ ...rawRow('row-redacted'), first_name: 'XXX' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.employee).toMatchObject({ firstName: null, lastName: 'BLANCO' });
+    expect(result.employee.displayName).toMatch(/^Record [A-F0-9]{12}$/);
   });
 
   it('paginates until the exact usable target and reports skipped rows', async () => {
@@ -46,6 +57,7 @@ describe('NYC Open Data importer', () => {
     expect(result.skippedRows).toBe(1);
     expect(result.skippedReasons).toEqual({ missing_agency: 1 });
     expect(result.checksum).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.sourceQuery).toContain('last_name, first_name, mid_init');
   });
 });
 
@@ -61,7 +73,8 @@ function rawRow(id: string): Record<string, unknown> {
     leave_status_as_of_june_30: 'ACTIVE',
     pay_basis: 'per Annum',
     base_salary: '100000.00',
-    first_name: 'PERSON',
-    last_name: 'REDACTED',
+    first_name: 'ELMER',
+    last_name: 'BLANCO',
+    mid_init: 'J',
   };
 }

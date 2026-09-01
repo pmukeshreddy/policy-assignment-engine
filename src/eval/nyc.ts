@@ -12,6 +12,9 @@ const selectedColumns = [
   'fiscal_year',
   'payroll_number',
   'agency_name',
+  'last_name',
+  'first_name',
+  'mid_init',
   'agency_start_date',
   'work_location_borough',
   'title_description',
@@ -31,6 +34,9 @@ export interface NormalizedNycEmployee {
   sourceRecordChecksum: string;
   externalId: string;
   displayName: string;
+  firstName: string | null;
+  lastName: string | null;
+  middleInitial: string | null;
   location: string;
   department: string;
   employmentType: string;
@@ -145,6 +151,9 @@ export function normalizeNycRow(row: Record<string, unknown>):
   if (fiscalYear === null || !/^\d{4}$/.test(fiscalYear)) return { ok: false, reason: 'invalid_fiscal_year' };
   const department = requiredText(row['agency_name'], 200);
   if (department === null) return { ok: false, reason: 'missing_agency' };
+  const firstName = optionalName(row['first_name'], 200);
+  const lastName = optionalName(row['last_name'], 200);
+  const middleInitial = optionalName(row['mid_init'], 50);
   const hireDate = parseDate(row['agency_start_date']);
   if (hireDate === null) return { ok: false, reason: 'invalid_agency_start_date' };
   const location = requiredText(row['work_location_borough'], 200);
@@ -182,6 +191,9 @@ export function normalizeNycRow(row: Record<string, unknown>):
     sourceRowId,
     fiscalYear,
     payrollNumber,
+    firstName,
+    lastName,
+    middleInitial,
     department,
     hireDate,
     location,
@@ -196,7 +208,12 @@ export function normalizeNycRow(row: Record<string, unknown>):
       sourceRowId,
       sourceRecordChecksum: sha256(stableJson(canonical)),
       externalId: `nyc-${identityHash.slice(0, 40)}`,
-      displayName: `NYC record ${identityHash.slice(0, 12)}`,
+      displayName: firstName !== null && lastName !== null
+        ? [firstName, middleInitial, lastName].filter((value): value is string => value !== null).join(' ')
+        : `Record ${identityHash.slice(0, 12).toLocaleUpperCase('en-US')}`,
+      firstName,
+      lastName,
+      middleInitial,
       location,
       department,
       employmentType: payBasis,
@@ -215,6 +232,35 @@ export async function importNycEmployees(pool: DbPool, fetched: NycFetchResult):
     ]);
     const companyId = await evaluationCompanyId(client);
     await resetEvaluationTenant(client, companyId);
+    const persisted = await persistNycEmployeeImport(client, companyId, fetched, {
+      createdBy: 'nyc-open-data-importer',
+      purpose: 'evaluation-source',
+      enqueueReconciliation: true,
+    });
+    if (persisted.reconciliationJobId === null) throw new Error('Evaluation import did not enqueue reconciliation');
+    return {
+      companyId,
+      importId: persisted.importId,
+      reconciliationJobId: persisted.reconciliationJobId,
+      fiscalYear: fetched.fiscalYear,
+      fetchedAt: fetched.fetchedAt,
+      fetchedRows: fetched.fetchedRows,
+      importedRows: fetched.employees.length,
+      skippedRows: fetched.skippedRows,
+      skippedReasons: fetched.skippedReasons,
+      sourceQuery: fetched.sourceQuery,
+      checksum: fetched.checksum,
+    };
+  });
+}
+
+export async function persistNycEmployeeImport(
+  client: DbClient,
+  companyId: string,
+  fetched: NycFetchResult,
+  options: { createdBy: string; purpose: string; enqueueReconciliation: boolean },
+): Promise<{ importId: string; reconciliationJobId: string | null }> {
+    if (fetched.employees.length < 1) throw new Error('Cannot import an empty NYC employee population');
     const importResult = await client.query<{ id: string }>(
       `INSERT INTO dataset_imports
          (company_id, dataset_id, source_url, source_query, fetched_at, requested_rows,
@@ -235,7 +281,9 @@ export async function importNycEmployees(pool: DbPool, fetched: NycFetchResult):
         JSON.stringify(fetched.skippedReasons),
         JSON.stringify({
           fiscalYear: fetched.fiscalYear,
-          identifiers: 'sha256(dataset_id + Socrata row id); source names discarded before persistence',
+          purpose: options.purpose,
+          identifiers: 'sha256(dataset_id + Socrata row id); stable source identity is independent of employee names',
+          nameFields: ['first_name', 'last_name', 'mid_init'],
         }),
       ],
     );
@@ -248,15 +296,16 @@ export async function importNycEmployees(pool: DbPool, fetched: NycFetchResult):
     );
     await client.query(
       `INSERT INTO employee_versions
-         (company_id, employee_id, version, valid_from, display_name, location, department,
-          employment_type, is_manager, hire_date, attributes, changed_fields, created_by)
-       SELECT $1, e.id, 1, $2::date, staged.display_name, staged.location, staged.department,
-              staged.employment_type, false, staged.hire_date, staged.attributes,
-              ARRAY['created', 'dataset_import'], 'nyc-open-data-importer'
+         (company_id, employee_id, version, valid_from, display_name, first_name, last_name,
+          middle_initial, location, department, employment_type, is_manager, hire_date,
+          attributes, changed_fields, created_by)
+       SELECT $1, e.id, 1, $2::date, staged.display_name, staged.first_name, staged.last_name,
+              staged.middle_initial, staged.location, staged.department, staged.employment_type,
+              false, staged.hire_date, staged.attributes, ARRAY['created', 'dataset_import'], $3
          FROM nyc_employee_staging staged
          JOIN employees e ON e.company_id = $1 AND e.external_id = staged.external_id
         ORDER BY e.id`,
-      [companyId, `${fetched.fiscalYear}-06-30`],
+      [companyId, `${fetched.fiscalYear}-06-30`, options.createdBy],
     );
     await client.query(
       `UPDATE employees e
@@ -275,6 +324,9 @@ export async function importNycEmployees(pool: DbPool, fetched: NycFetchResult):
               jsonb_build_object(
                 'externalId', staged.external_id,
                 'displayName', staged.display_name,
+                'firstName', staged.first_name,
+                'lastName', staged.last_name,
+                'middleInitial', staged.middle_initial,
                 'location', staged.location,
                 'department', staged.department,
                 'employmentType', staged.employment_type,
@@ -293,28 +345,17 @@ export async function importNycEmployees(pool: DbPool, fetched: NycFetchResult):
     if (Number(count.rows[0]?.count) !== fetched.employees.length) {
       throw new Error(`Imported row count ${count.rows[0]?.count ?? '0'} does not match validated population ${fetched.employees.length}`);
     }
-    const reconciliationJobId = await enqueueJob(client, {
-      companyId,
-      eventType: 'DATASET_IMPORT_COMPLETED',
-      scope: 'FULL',
-      payload: { importId, datasetId: NYC_DATASET_ID, importedRows: fetched.employees.length },
-      dedupeKey: `dataset-import:${importId}`,
-      priority: 50,
-    });
-    return {
-      companyId,
-      importId,
-      reconciliationJobId,
-      fiscalYear: fetched.fiscalYear,
-      fetchedAt: fetched.fetchedAt,
-      fetchedRows: fetched.fetchedRows,
-      importedRows: fetched.employees.length,
-      skippedRows: fetched.skippedRows,
-      skippedReasons: fetched.skippedReasons,
-      sourceQuery: fetched.sourceQuery,
-      checksum: fetched.checksum,
-    };
-  });
+    const reconciliationJobId = options.enqueueReconciliation
+      ? await enqueueJob(client, {
+        companyId,
+        eventType: 'DATASET_IMPORT_COMPLETED',
+        scope: 'FULL',
+        payload: { importId, datasetId: NYC_DATASET_ID, importedRows: fetched.employees.length },
+        dedupeKey: `dataset-import:${importId}`,
+        priority: 50,
+      })
+      : null;
+    return { importId, reconciliationJobId };
 }
 
 async function fetchRows(
@@ -384,6 +425,9 @@ async function stageEmployees(client: DbClient, employees: readonly NormalizedNy
     `CREATE TEMP TABLE nyc_employee_staging (
        external_id text PRIMARY KEY,
        display_name text NOT NULL,
+       first_name text,
+       last_name text,
+       middle_initial text,
        location text NOT NULL,
        department text NOT NULL,
        employment_type text NOT NULL,
@@ -397,15 +441,18 @@ async function stageEmployees(client: DbClient, employees: readonly NormalizedNy
     const batch = employees.slice(offset, offset + 1_000);
     await client.query(
       `INSERT INTO nyc_employee_staging
-         (external_id, display_name, location, department, employment_type, hire_date,
-          attributes, source_row_id, source_record_checksum)
+         (external_id, display_name, first_name, last_name, middle_initial, location, department,
+          employment_type, hire_date, attributes, source_row_id, source_record_checksum)
        SELECT * FROM unnest(
-         $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::date[],
-         $7::jsonb[], $8::text[], $9::text[]
+         $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
+         $7::text[], $8::text[], $9::date[], $10::jsonb[], $11::text[], $12::text[]
        )`,
       [
         batch.map((employee) => employee.externalId),
         batch.map((employee) => employee.displayName),
+        batch.map((employee) => employee.firstName),
+        batch.map((employee) => employee.lastName),
+        batch.map((employee) => employee.middleInitial),
         batch.map((employee) => employee.location),
         batch.map((employee) => employee.department),
         batch.map((employee) => employee.employmentType),
@@ -422,6 +469,17 @@ function requiredText(value: unknown, maxLength: number): string | null {
   if (typeof value !== 'string') return null;
   const normalized = value.trim().replace(/\s+/g, ' ');
   return normalized.length > 0 && normalized.length <= maxLength ? normalized : null;
+}
+
+function usableName(value: unknown, maxLength: number): string | null {
+  const normalized = requiredText(value, maxLength);
+  if (normalized === null || /^(?:x{2,}|redacted|unknown|n\/?a)$/i.test(normalized)) return null;
+  return normalized;
+}
+
+function optionalName(value: unknown, maxLength: number): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  return usableName(value, maxLength);
 }
 
 function parseDate(value: unknown): string | null {
