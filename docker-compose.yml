@@ -24,6 +24,16 @@ services:
       postgres:
         condition: service_healthy
 
+  seed-demo:
+    build: .
+    command: npm run seed:demo:start
+    environment:
+      DATABASE_URL: postgres://policy:policy@postgres:5432/policy_engine
+      LOG_LEVEL: warn
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   app:
     build: .
     command: npm start
@@ -34,7 +44,7 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      migrate:
+      seed-demo:
         condition: service_completed_successfully
 
   worker:
@@ -43,7 +53,7 @@ services:
     environment:
       DATABASE_URL: postgres://policy:policy@postgres:5432/policy_engine
     depends_on:
-      migrate:
+      seed-demo:
         condition: service_completed_successfully
 
 volumes:

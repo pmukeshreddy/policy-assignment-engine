@@ -117,7 +117,7 @@ describe('PostgreSQL API, reconciliation, and history', () => {
       condition: { type: 'comparison', fact: { kind: 'employee', field: 'location' }, operator: 'EQ', value: 'NY' },
     });
     expect(preview).toMatchObject({
-      employeesEvaluated: 1, affectedEmployees: 1, assignmentsAdded: 1, assignmentsRemoved: 1, assignmentsChanged: 1,
+      employeesEvaluated: 1, employeesMatched: 0, affectedEmployees: 1, assignmentsAdded: 1, assignmentsRemoved: 1, assignmentsChanged: 1,
     });
 
     now = new Date('2026-08-02T12:00:00Z');
@@ -173,6 +173,11 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     await request('DELETE', `/manual-overrides/${sameDayOverride.id}`);
     await drainJobs();
     expect((await request('GET', `/employees/${employee.id}/assignments`)).data[0].policy_key).toBe('enhanced');
+    const audit = await request('GET', '/audit?limit=100');
+    expect(audit.ruleChanges.some((change: { rule_key: string }) => change.rule_key === 'enhanced-ca')).toBe(true);
+    expect(audit.assignmentChanges.some((change: { employee_id: string }) => change.employee_id === employee.id)).toBe(true);
+    expect(audit.overrides.some((item: { employee_id: string }) => item.employee_id === employee.id)).toBe(true);
+    expect(audit.technical.reconciliationJobs.length).toBeGreaterThan(0);
   });
 
   it('uses group dependency impact without disturbing another category', async () => {
@@ -252,6 +257,8 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     );
     const unscoped = new ReconciliationWorker(pool, workerConfig, clock);
     expect(await unscoped.processNext()).toBeNull();
+    const companies = await request('GET', '/companies', undefined, false);
+    expect(companies.data.some((company: { id: string }) => company.id === evaluationCompany.id)).toBe(false);
     const scoped = new ReconciliationWorker(pool, workerConfig, clock, evaluationCompany.id);
     expect((await scoped.processNext())?.job.id).toBe(job.rows[0]!.id);
     await pool.query('DELETE FROM companies WHERE id = $1', [evaluationCompany.id]);

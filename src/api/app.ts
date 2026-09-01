@@ -78,7 +78,12 @@ export function buildApp(input: {
   });
 
   app.get('/companies', async () => {
-    const result = await input.pool.query('SELECT id, name, created_at FROM companies ORDER BY created_at, id');
+    const result = await input.pool.query(
+      `SELECT c.id, c.name, c.created_at
+         FROM companies c
+        WHERE NOT EXISTS (SELECT 1 FROM evaluation_tenants evaluation WHERE evaluation.company_id = c.id)
+        ORDER BY CASE WHEN c.name = 'Policy Assignment Demo' THEN 0 ELSE 1 END, c.created_at, c.id`,
+    );
     return { data: result.rows };
   });
 
@@ -170,6 +175,153 @@ export function buildApp(input: {
     const companyId = companyIdFrom(request);
     const query = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(request.query);
     return { data: await loadActivity(input.pool, companyId, query.limit) };
+  });
+
+  app.get('/audit', async (request) => {
+    const companyId = companyIdFrom(request);
+    const query = z.object({ limit: z.coerce.number().int().min(1).max(200).default(100) }).parse(request.query);
+    const [employees, rules, assignments, overrides, jobs] = await Promise.all([
+      input.pool.query(
+        `SELECT current.id, current.created_at AS occurred_at, e.id AS employee_id,
+                current.display_name AS employee_name, current.version, current.changed_fields,
+                jsonb_build_object(
+                  'location', previous.location,
+                  'department', previous.department,
+                  'employment_type', previous.employment_type,
+                  'is_manager', previous.is_manager,
+                  'hire_date', previous.hire_date,
+                  'attributes', previous.attributes
+                ) AS before,
+                jsonb_build_object(
+                  'location', current.location,
+                  'department', current.department,
+                  'employment_type', current.employment_type,
+                  'is_manager', current.is_manager,
+                  'hire_date', current.hire_date,
+                  'attributes', current.attributes
+                ) AS after
+           FROM employee_versions current
+           JOIN employee_versions previous
+             ON previous.company_id = current.company_id
+            AND previous.employee_id = current.employee_id
+            AND previous.version = current.version - 1
+           JOIN employees e ON e.company_id = current.company_id AND e.id = current.employee_id
+          WHERE current.company_id = $1
+          ORDER BY current.created_at DESC, current.id DESC
+          LIMIT $2`,
+        [companyId, query.limit],
+      ),
+      input.pool.query(
+        `SELECT current.id, current.created_at AS occurred_at, r.id AS rule_id, r.key AS rule_key,
+                current.version, pv.name AS policy_name,
+                jsonb_build_object(
+                  'priority', previous.priority,
+                  'enabled', previous.enabled,
+                  'valid_from', previous.valid_from,
+                  'valid_to', previous.valid_to,
+                  'condition', previous.condition
+                ) AS before,
+                jsonb_build_object(
+                  'priority', current.priority,
+                  'enabled', current.enabled,
+                  'valid_from', current.valid_from,
+                  'valid_to', current.valid_to,
+                  'condition', current.condition
+                ) AS after
+           FROM rule_versions current
+           JOIN rule_versions previous
+             ON previous.company_id = current.company_id
+            AND previous.rule_id = current.rule_id
+            AND previous.version = current.version - 1
+           JOIN rules r ON r.company_id = current.company_id AND r.id = current.rule_id
+           JOIN policies p ON p.company_id = current.company_id AND p.id = current.policy_id
+           JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
+          WHERE current.company_id = $1
+          ORDER BY current.created_at DESC, current.id DESC
+          LIMIT $2`,
+        [companyId, query.limit],
+      ),
+      input.pool.query(
+        `WITH ordered AS (
+           SELECT ad.id, ad.employee_id, ad.category_id, ad.as_of_date, ad.decided_at,
+                  ad.winners,
+                  lag(ad.winners) OVER (
+                    PARTITION BY ad.company_id, ad.employee_id, ad.category_id
+                    ORDER BY ad.decided_at, ad.id
+                  ) AS previous_winners,
+                  ad.reconciliation_job_id
+             FROM assignment_decisions ad
+            WHERE ad.company_id = $1
+         )
+         SELECT ordered.id, ordered.decided_at AS occurred_at, ordered.employee_id,
+                ev.display_name AS employee_name, pc.name AS category_name,
+                COALESCE(previous_names.names, '{}') AS before,
+                COALESCE(current_names.names, '{}') AS after,
+                ma.id AS assignment_id, ordered.reconciliation_job_id
+           FROM ordered
+           JOIN employees e ON e.company_id = $1 AND e.id = ordered.employee_id
+           JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.id = e.current_version_id
+           JOIN policy_categories pc ON pc.company_id = $1 AND pc.id = ordered.category_id
+           LEFT JOIN LATERAL (
+             SELECT assignment.id
+               FROM materialized_assignments assignment
+              WHERE assignment.company_id = $1 AND assignment.employee_id = ordered.employee_id
+                AND assignment.category_id = ordered.category_id AND assignment.decision_id = ordered.id
+              ORDER BY assignment.policy_id, assignment.id
+              LIMIT 1
+           ) ma ON true
+           LEFT JOIN LATERAL (
+             SELECT array_agg(pv.name ORDER BY pv.name) AS names
+               FROM jsonb_array_elements(COALESCE(ordered.previous_winners, '[]'::jsonb)) candidate
+               JOIN policies p ON p.company_id = $1 AND p.id = (candidate->>'policyId')::uuid
+               JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
+           ) previous_names ON true
+           LEFT JOIN LATERAL (
+             SELECT array_agg(pv.name ORDER BY pv.name) AS names
+               FROM jsonb_array_elements(ordered.winners) candidate
+               JOIN policies p ON p.company_id = $1 AND p.id = (candidate->>'policyId')::uuid
+               JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
+           ) current_names ON true
+          WHERE COALESCE(ordered.previous_winners, '[]'::jsonb) IS DISTINCT FROM ordered.winners
+          ORDER BY ordered.decided_at DESC, ordered.id DESC
+          LIMIT $2`,
+        [companyId, query.limit],
+      ),
+      input.pool.query(
+        `SELECT mo.id, COALESCE(mo.revoked_at, mo.created_at) AS occurred_at,
+                mo.employee_id, ev.display_name AS employee_name, pv.name AS policy_name,
+                pc.name AS category_name, mo.action, mo.reason, mo.valid_from, mo.valid_to,
+                mo.created_at, mo.revoked_at
+           FROM manual_overrides mo
+           JOIN employees e ON e.company_id = mo.company_id AND e.id = mo.employee_id
+           JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.id = e.current_version_id
+           JOIN policies p ON p.company_id = mo.company_id AND p.id = mo.policy_id
+           JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
+           JOIN policy_categories pc ON pc.company_id = p.company_id AND pc.id = p.category_id
+          WHERE mo.company_id = $1
+          ORDER BY occurred_at DESC, mo.id DESC
+          LIMIT $2`,
+        [companyId, query.limit],
+      ),
+      input.pool.query(
+        `SELECT id, event_type, scope, status, attempts, created_at, started_at, finished_at,
+                CASE WHEN started_at IS NULL THEN NULL
+                  ELSE round(extract(epoch FROM (COALESCE(finished_at, now()) - started_at)) * 1000)::bigint
+                END AS duration_ms
+           FROM reconciliation_jobs
+          WHERE company_id = $1
+          ORDER BY created_at DESC, id DESC
+          LIMIT $2`,
+        [companyId, query.limit],
+      ),
+    ]);
+    return {
+      employeeChanges: employees.rows,
+      ruleChanges: rules.rows,
+      assignmentChanges: assignments.rows,
+      overrides: overrides.rows,
+      technical: { reconciliationJobs: jobs.rows },
+    };
   });
 
   app.get('/overview', async (request) => {
@@ -590,7 +742,12 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
     const companyId = companyIdFrom(request);
     const result = await pool.query(
       `SELECT g.id, g.slug AS key, g.name, g.description,
-              count(gm.id) FILTER (WHERE gm.valid_from <= CURRENT_DATE AND (gm.valid_to IS NULL OR gm.valid_to > CURRENT_DATE))::int AS member_count
+              count(gm.id) FILTER (WHERE gm.valid_from <= CURRENT_DATE AND (gm.valid_to IS NULL OR gm.valid_to > CURRENT_DATE))::int AS member_count,
+              (SELECT count(DISTINCT rv.rule_id)::int
+                 FROM rule_dependencies rd
+                 JOIN rule_versions rv ON rv.company_id = rd.company_id AND rv.id = rd.rule_version_id
+                WHERE rd.company_id = g.company_id AND rd.dependency_type = 'GROUP'
+                  AND rd.dependency_key = g.id::text AND rv.status = 'PUBLISHED' AND rv.enabled) AS rule_count
          FROM groups g
          LEFT JOIN group_memberships gm ON gm.company_id = g.company_id AND gm.group_id = g.id
         WHERE g.company_id = $1
@@ -624,7 +781,7 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
       [companyId, groupId, todayUtc(clock)],
     );
     if (group.rows[0] === undefined) throw notFound('Group');
-    const members = await pool.query(
+    const [members, dependentRules] = await Promise.all([pool.query(
       `SELECT e.id, e.external_id, ev.display_name, ev.department, ev.location,
               gm.valid_from, count(*) OVER()::int AS total_count
          FROM group_memberships gm
@@ -638,7 +795,18 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
         ORDER BY ev.display_name, e.id
         LIMIT $5 OFFSET $6`,
       [companyId, groupId, todayUtc(clock), query.search?.trim() || null, query.limit, query.offset],
-    );
+    ), pool.query(
+      `SELECT DISTINCT r.id, r.key, pv.name AS policy_name, rv.priority
+         FROM rule_dependencies rd
+         JOIN rule_versions rv ON rv.company_id = rd.company_id AND rv.id = rd.rule_version_id
+         JOIN rules r ON r.company_id = rv.company_id AND r.id = rv.rule_id
+         JOIN policies p ON p.company_id = rv.company_id AND p.id = rv.policy_id
+         JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
+        WHERE rd.company_id = $1 AND rd.dependency_type = 'GROUP'
+          AND rd.dependency_key = $2::text AND rv.status = 'PUBLISHED' AND rv.enabled
+        ORDER BY r.key, r.id`,
+      [companyId, groupId],
+    )]);
     return {
       ...group.rows[0] as Record<string, unknown>,
       members: members.rows.map((row) => {
@@ -650,6 +818,7 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
         limit: query.limit,
         offset: query.offset,
       },
+      dependentRules: dependentRules.rows,
     };
   });
 
@@ -1334,11 +1503,28 @@ function registerAssignmentRoutes(app: FastifyInstance, pool: DbPool, clock: () 
           WHERE p.company_id = $1 AND p.id = ANY($2::uuid[])`,
         [companyId, policyIds, asOfDate],
       );
+    const ruleIds = [...new Set(
+      [...record.candidates, ...record.winners, ...record.rejected.map((item) => item.candidate)]
+        .map((candidate) => candidate['ruleId'])
+        .filter((ruleId): ruleId is string => typeof ruleId === 'string'),
+    )];
+    const ruleDetails = ruleIds.length === 0
+      ? { rows: [] as Array<{ id: string; key: string }> }
+      : await pool.query<{ id: string; key: string }>(
+        'SELECT id, key FROM rules WHERE company_id = $1 AND id = ANY($2::uuid[])',
+        [companyId, ruleIds],
+      );
     const policyById = new Map(policyDetails.rows.map((policy) => [policy.id, policy]));
+    const ruleById = new Map(ruleDetails.rows.map((rule) => [rule.id, rule]));
     const enrichCandidate = (candidate: Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
       if (candidate === undefined) return undefined;
       const policy = typeof candidate['policyId'] === 'string' ? policyById.get(candidate['policyId']) : undefined;
-      return policy === undefined ? candidate : { ...candidate, policyKey: policy.key, policyName: policy.name };
+      const rule = typeof candidate['ruleId'] === 'string' ? ruleById.get(candidate['ruleId']) : undefined;
+      return {
+        ...candidate,
+        ...(policy === undefined ? {} : { policyKey: policy.key, policyName: policy.name }),
+        ...(rule === undefined ? {} : { ruleKey: rule.key }),
+      };
     };
     const enrichedRejected = rejectedCompetitors.map((item) => ({
       ...item,

@@ -11,8 +11,12 @@ describe('production admin application', () => {
     expect(html).toContain('aria-label="Primary navigation"');
     expect(html).toContain('aria-labelledby="inspector-title"');
     expect(html).toContain('aria-live="polite"');
-    for (const route of ['overview', 'employees', 'groups', 'categories', 'policies', 'rules', 'overrides', 'reconciliation', 'audit', 'settings']) {
+    for (const route of ['overview', 'employees', 'groups', 'policies', 'rules', 'audit']) {
       expect(script).toContain(`'${route}'`);
+    }
+    const navigation = script.slice(script.indexOf('const navGroups'), script.indexOf('const routeLabels'));
+    for (const hiddenRoute of ['categories', 'overrides', 'reconciliation', 'settings']) {
+      expect(navigation).not.toContain(`'${hiddenRoute}'`);
     }
     expect(script).toContain("event.metaKey || event.ctrlKey");
   });
@@ -22,8 +26,10 @@ describe('production admin application', () => {
 
     expect(script).toContain("api('/employees/preview'");
     expect(script).toContain("api('/rules/preview'");
-    expect(script).toContain('/explanation`');
-    expect(script).toContain('No rule logic is duplicated in this browser.');
+    expect(script).toContain('/explanation${asOfDate');
+    expect(script).toContain('same resolver that creates final assignments');
+    expect(script).toContain('/assignments/as-of?date=');
+    expect(script).toContain("api('/audit?limit=100')");
     expect(script).toContain('data-node-logic');
     expect(script).toContain('attribute:custom');
     expect(script).toContain('data-employee-lookup');

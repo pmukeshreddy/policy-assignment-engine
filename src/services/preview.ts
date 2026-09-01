@@ -40,6 +40,7 @@ interface OverrideRow {
 
 export interface PreviewResult {
   employeesEvaluated: number;
+  employeesMatched: number;
   affectedEmployees: number;
   assignmentsAdded: number;
   assignmentsRemoved: number;
@@ -340,6 +341,7 @@ export class PreviewService {
 
     const totals: PreviewResult = {
       employeesEvaluated: 0,
+      employeesMatched: 0,
       affectedEmployees: 0,
       assignmentsAdded: 0,
       assignmentsRemoved: 0,
@@ -362,6 +364,7 @@ export class PreviewService {
         categoryId,
         cardinality: category.cardinality,
         rules,
+        proposedRuleVersionId: proposed.ruleVersionId,
         employeeIds: batchIds,
         totals,
         exampleLimit,
@@ -376,6 +379,7 @@ export class PreviewService {
     categoryId: string;
     cardinality: 'SINGLE' | 'MULTIPLE';
     rules: EvaluatableRule[];
+    proposedRuleVersionId: string;
     employeeIds: string[];
     totals: PreviewResult;
     exampleLimit: number;
@@ -455,6 +459,9 @@ export class PreviewService {
         rules: input.rules,
         overrides: employeeOverrides,
       });
+      if (evaluation.candidates.some((candidate) => candidate.ruleVersionId === input.proposedRuleVersionId)) {
+        input.totals.employeesMatched += 1;
+      }
       const before = (assignments.get(row.id) ?? []).map((assignment) => assignment.policy_id).sort();
       const after = evaluation.winners.map((winner) => winner.policyId).sort();
       const beforeSet = new Set(before);

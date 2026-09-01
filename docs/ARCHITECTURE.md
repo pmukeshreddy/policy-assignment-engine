@@ -202,7 +202,9 @@ Concurrency was selected from a measured local calibration: 8 workers processed 
 
 ## Admin product surface
 
-Fastify serves the dependency-light admin application from `/admin/`; it uses the same JSON API as external consumers. The persistent shell maps the domain into People, Policies, and Operations rather than exposing tables or job internals. Employee and rule change previews call backend preview services, explanations read immutable decision evidence, and writes flow through the same effective-dated source APIs and transactional jobs as any other client.
+Fastify serves the dependency-light admin application from `/admin/`; it uses the same JSON API as external consumers. The persistent shell maps the reviewer model into Overview, People, Policies, Rules, and Audit. Categories are contained inside Policies, manual controls are contained inside Employee detail, and reconciliation jobs are collapsed under Audit technical details. Employee and rule change previews call backend preview services, explanations read immutable decision evidence, and writes flow through the same effective-dated source APIs and transactional jobs as any other client.
+
+The idempotent `seed:demo` command creates the clearly labelled reviewer workspace through Fastify mutations, then drains its jobs through a company-scoped `ReconciliationWorker`. It never writes materialized assignments directly. `GET /companies` excludes `evaluation_tenants`, keeping the 50,000-person NYC workload out of the normal product workspace while preserving the evaluation database and certified artifacts unchanged.
 
 Employee list filtering/pagination is server-side for large tenants. Detail drawers preserve list context, while native dialogs provide focus trapping for onboarding, impact review, structured rule editing, and exceptional manual controls. The recursive builder expresses the validated AND/OR/NOT/comparison/group AST without arbitrary code. Responsive tables retain every important value as labelled rows. See [UX design](UX_DESIGN.md) for research references and interaction rationale.
 

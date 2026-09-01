@@ -2,7 +2,7 @@
 
 ## Product intent
 
-Policy Assignment is an operational system for administrators who change employee facts, publish rules, manage exceptions, and need to trust the resulting policy state. The interface therefore prioritizes compact resource navigation, visible consequences, and decision evidence. It deliberately avoids decorative analytics, marketing copy, oversized cards, ornamental charts, broad gradients, and effects that reduce information density.
+Policy Assignment is a focused reviewer product for understanding one causal loop: policies define what can be assigned, rules define who receives them, employee facts determine matches, the resolver selects winners, reconciliation keeps those winners current, and Why explains every decision. The interface prioritizes that model over internal infrastructure. It deliberately avoids decorative analytics, evaluation telemetry, queue dashboards, marketing copy, oversized cards, ornamental charts, broad gradients, and effects that reduce information density.
 
 The visual system uses neutral surfaces, one evergreen accent, subtle borders, a 4/8-pixel spacing rhythm, compact tables, and a single line-icon language. Status never relies on color alone. Desktop is primary, while tables become labelled structured rows and navigation becomes an accessible overlay on narrow screens.
 
@@ -24,12 +24,13 @@ The persistent shell groups resources by the administrator's mental model:
 ```text
 Overview
 People       Employees · Groups
-Policies     Assignment categories · Policies · Rules
-Operations   Manual overrides · Reconciliation · Audit & activity
-Settings
+Policies     Policies · Rules
+Audit
 ```
 
-The Overview explains the actual source → decision → resolution → explanation pipeline and shows live counts, reconciliation health, exceptions, and activity. It does not contain decorative charts or arbitrary KPIs.
+The Overview is a four-step walkthrough with real actions: create a policy, create a rule, add an employee, and review assignments. It has a small activity feed, but no employee totals, queue sizes, evaluation-tenant statistics, or generic KPI grid.
+
+Categories are presented inside Policies in plain language: “one policy per employee” or “employees may receive multiple policies.” Manual overrides are exceptional employee-specific actions on Employee detail. Reconciliation is a product behavior, not a navigation destination; its job records are available only under Audit's “Technical reconciliation details” disclosure. Settings add no value to the challenge journey and are omitted.
 
 Employee and configuration lists use compact tables because comparison matters. Employee search, facets, sort, and pagination are server-backed for large populations. Selecting an employee opens a side panel so table filters and scroll context remain intact. The panel separates current assignments, employment facts, and dated history.
 
@@ -47,7 +48,7 @@ The preview calls `POST /employees/preview`, which uses the production evaluator
 
 Rule creation uses a recursive, structured builder for comparison, group, AND, OR, and NOT nodes. Administrators see a human sentence and must run the real rule preview before publish is enabled. Preview counts and representative employees come from the same evaluator/resolver used by reconciliation.
 
-Manual overrides are visually exceptional, always require a reason, and use a confirmation before revocation. Full reconciliation and membership removal also require explicit confirmation. Destructive operations explain the resulting automatic behavior before they run.
+Manual overrides are visually exceptional, always require a reason, state that they override automatic rules, and use a confirmation before removal. Membership removal also requires explicit confirmation. Destructive operations explain the resulting automatic behavior before they run.
 
 ## Feedback, accessibility, and responsive behavior
 
@@ -61,4 +62,20 @@ Manual overrides are visually exceptional, always require a reason, and use a co
 
 ## Why this fits policy administration
 
-The engine's differentiator is not CRUD volume; it is trustworthy consequences. The interface keeps employee facts, rule intent, conflict semantics, materialized state, operations, and audit evidence connected in one application. An administrator can understand what a policy is, who receives it, why it won, what an edit will change, whether reconciliation succeeded, and how to investigate history without reading the architecture document or inspecting raw records.
+The engine's differentiator is not CRUD volume; it is trustworthy consequences. The interface keeps employee facts, rule intent, conflict semantics, materialized state, and audit evidence connected without making job machinery a primary concept. A reviewer can understand what a policy is, who receives it, why it won, what an edit will change, and how to reconstruct a historical decision without reading the architecture document or inspecting raw records.
+
+## Reviewer workspace and journey
+
+`npm run seed:demo` creates **Policy Assignment Demo** through the production Fastify mutation routes and company-scoped reconciliation worker. Its 24 fictional employees and intentionally conflicting rules exist only to demonstrate the product flows; they are unrelated to the deterministic NYC evaluation universe. Evaluation tenants are hidden from the workspace switcher.
+
+The intended walkthrough is:
+
+```text
+Policies → understand assignable outcomes and category behavior
+Rules → inspect English-like conditions and preview impact
+Employees → open Alice Johnson and inspect current policies
+Why → inspect matching facts, competitors, and precedence
+Edit employee → preview NY → CA assignment changes before saving
+Add employee → preview resolved policies before creation
+Audit → see the employee and assignment changes, with technical work collapsed
+```
