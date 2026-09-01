@@ -35,4 +35,18 @@ describe('production admin application', () => {
     expect(script).toContain('data-employee-lookup');
     expect(script).not.toContain('JSON.stringify(winner.trace');
   });
+
+  it('keeps the NYC reviewer population and employee table server-driven', async () => {
+    const [script, api] = await Promise.all([
+      readPublic('app.js'),
+      readFile(new URL('../../src/api/app.ts', import.meta.url), 'utf8'),
+    ]);
+
+    expect(script).toContain('real NYC Open Data employee facts');
+    expect(script).toContain('Evaluation / demonstration policy configuration');
+    expect(script).toContain("facet('status', result.facets.employment_statuses");
+    expect(api).toContain('WITH page AS MATERIALIZED');
+    expect(api).toContain('policy_counts AS');
+    expect(api).toContain("ev.attributes ->> 'employment_status'");
+  });
 });

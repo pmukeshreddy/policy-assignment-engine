@@ -47,7 +47,7 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     });
     const employee = await request('POST', '/employees', {
       externalId: 'E-100', displayName: 'Integration Employee', location: 'CA', department: 'Engineering',
-      employmentType: 'full_time', hireDate: '2024-01-01', attributes: { country: 'US' }, effectiveFrom: '2026-08-01',
+      employmentType: 'full_time', hireDate: '2024-01-01', attributes: { country: 'US', employment_status: 'ACTIVE' }, effectiveFrom: '2026-08-01',
     });
     await request('POST', '/rules', {
       key: 'default-pto', policyId: standard.id, priority: 10, enabled: true, validFrom: '2026-08-01', publish: true,
@@ -99,9 +99,10 @@ describe('PostgreSQL API, reconciliation, and history', () => {
       after: [{ name: 'Standard PTO' }],
     });
 
-    const employeeList = await request('GET', '/employees?search=Integration&location=CA&limit=10');
+    const employeeList = await request('GET', '/employees?search=Integration&location=CA&status=ACTIVE&limit=10');
     expect(employeeList.meta).toMatchObject({ total: 1, limit: 10, offset: 0 });
     expect(employeeList.facets.locations).toContain('CA');
+    expect(employeeList.facets.employment_statuses).toContain('ACTIVE');
     expect(employeeList.data[0].policy_count).toBe(1);
     const overview = await request('GET', '/overview');
     expect(overview).toMatchObject({ employees: 1, active_policies: 2, active_rules: 2, assignments: 1 });

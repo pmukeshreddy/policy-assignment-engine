@@ -66,16 +66,18 @@ The engine's differentiator is not CRUD volume; it is trustworthy consequences. 
 
 ## Reviewer workspace and journey
 
-`npm run seed:demo` creates **Policy Assignment Demo** through the production Fastify mutation routes and company-scoped reconciliation worker. Its 24 fictional employees and intentionally conflicting rules exist only to demonstrate the product flows; they are unrelated to the deterministic NYC evaluation universe. Evaluation tenants are hidden from the workspace switcher.
+`npm run seed:reviewer` creates **NYC Open Data Policy Workspace** from the 50,000 normalized source facts already persisted by the NYC importer. It never calls the NYC API. The copy has reviewer-owned employee identities, versions, import provenance, assignments, and jobs, while the source evaluation tenant and certified results remain isolated. The imported names are privacy-preserving opaque record labels because the importer deliberately discards source names.
+
+The policies, groups, and rules are visibly labelled **Evaluation / demonstration policy configuration**. They are intentionally small and explainable, and the product never implies that NYC created or uses them.
 
 The intended walkthrough is:
 
 ```text
 Policies → understand assignable outcomes and category behavior
 Rules → inspect English-like conditions and preview impact
-Employees → open Alice Johnson and inspect current policies
+Employees → open an imported NYC record and inspect current policies
 Why → inspect matching facts, competitors, and precedence
-Edit employee → preview NY → CA assignment changes before saving
+Edit employee → preview a fact or manager-status change before saving a new reviewer-only version
 Add employee → preview resolved policies before creation
 Audit → see the employee and assignment changes, with technical work collapsed
 ```

@@ -79,10 +79,13 @@ export function buildApp(input: {
 
   app.get('/companies', async () => {
     const result = await input.pool.query(
-      `SELECT c.id, c.name, c.created_at
+      `SELECT c.id, c.name, c.created_at,
+              CASE WHEN reviewer.company_id IS NULL THEN 'STANDARD' ELSE 'NYC_OPEN_DATA_REVIEWER' END AS workspace_kind,
+              reviewer.imported_employee_count
          FROM companies c
+         LEFT JOIN reviewer_workspaces reviewer ON reviewer.company_id = c.id
         WHERE NOT EXISTS (SELECT 1 FROM evaluation_tenants evaluation WHERE evaluation.company_id = c.id)
-        ORDER BY CASE WHEN c.name = 'Policy Assignment Demo' THEN 0 ELSE 1 END, c.created_at, c.id`,
+        ORDER BY CASE WHEN reviewer.company_id IS NULL THEN 1 ELSE 0 END, c.created_at, c.id`,
     );
     return { data: result.rows };
   });
@@ -347,7 +350,29 @@ export function buildApp(input: {
           WHERE company_id = $1 AND decided_at >= now() - interval '7 days') AS decisions_last_7_days`,
       [companyId],
     );
-    return { ...counts.rows[0] as Record<string, unknown>, activity: await loadActivity(input.pool, companyId, 8) };
+    const source = await input.pool.query(
+      `SELECT reviewer.dataset_id,
+              reviewer.imported_employee_count,
+              reviewer.policy_configuration_kind,
+              imported.source_url,
+              imported.fetched_at,
+              imported.checksum,
+              imported.metadata ->> 'fiscalYear' AS fiscal_year,
+              (SELECT count(*)::int FROM employee_import_records records
+                WHERE records.company_id = reviewer.company_id
+                  AND records.import_id = reviewer.reviewer_import_id) AS provenance_records
+         FROM reviewer_workspaces reviewer
+         JOIN dataset_imports imported
+           ON imported.company_id = reviewer.company_id
+          AND imported.id = reviewer.reviewer_import_id
+        WHERE reviewer.company_id = $1`,
+      [companyId],
+    );
+    return {
+      ...counts.rows[0] as Record<string, unknown>,
+      source: source.rows[0] ?? null,
+      activity: await loadActivity(input.pool, companyId, 8),
+    };
   });
 
   return app;
@@ -467,6 +492,7 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       department: z.string().max(200).optional(),
       location: z.string().max(200).optional(),
       employmentType: z.string().max(200).optional(),
+      status: z.string().max(200).optional(),
       manager: z.enum(['true', 'false']).optional(),
       sort: z.enum(['name', 'department', 'location', 'employmentType', 'changed']).default('name'),
       direction: z.enum(['asc', 'desc']).default('asc'),
@@ -475,68 +501,101 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       offset: z.coerce.number().int().min(0).default(0),
     }).parse(request.query);
     const sortColumns = {
-      name: 'ev.display_name',
-      department: 'ev.department',
-      location: 'ev.location',
-      employmentType: 'ev.employment_type',
-      changed: 'e.updated_at',
+      name: ['ev.display_name', 'page.display_name'],
+      department: ['ev.department', 'page.department'],
+      location: ['ev.location', 'page.location'],
+      employmentType: ['ev.employment_type', 'page.employment_type'],
+      changed: ['e.updated_at', 'page.last_changed'],
     } as const;
-    const order = `${sortColumns[query.sort]} ${query.direction === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, e.id`;
-    const result = await pool.query(
-      `SELECT e.id, e.external_id, ev.id AS version_id, ev.version, ev.valid_from,
-              ev.display_name, ev.email, ev.location, ev.department, ev.employment_type,
-              ev.is_manager, ev.hire_date, ev.attributes, e.updated_at AS last_changed,
-              (SELECT count(*)::int FROM materialized_assignments ma
-                WHERE ma.company_id = e.company_id AND ma.employee_id = e.id) AS policy_count,
-              count(*) OVER()::int AS total_count
+    const direction = query.direction === 'desc' ? 'DESC' : 'ASC';
+    const order = `${sortColumns[query.sort][0]} ${direction} NULLS LAST, e.id`;
+    const pageOrder = `${sortColumns[query.sort][1]} ${direction} NULLS LAST, page.id`;
+    const parameters = [
+      companyId,
+      todayUtc(clock),
+      query.search?.trim() || null,
+      query.department ?? null,
+      query.location ?? null,
+      query.employmentType ?? null,
+      query.status ?? null,
+      query.manager === undefined ? null : query.manager === 'true',
+    ];
+    const [result, totalResult, facets] = await Promise.all([
+      pool.query(
+      `WITH page AS MATERIALIZED (
+         SELECT e.id, e.external_id, ev.id AS version_id, ev.version, ev.valid_from,
+                ev.display_name, ev.email, ev.location, ev.department, ev.employment_type,
+                ev.is_manager, ev.hire_date, ev.attributes, e.updated_at AS last_changed
+           FROM employees e
+           JOIN employee_versions ev ON ev.employee_id = e.id AND ev.company_id = e.company_id
+            AND ev.valid_from <= $2::date AND (ev.valid_to IS NULL OR ev.valid_to > $2::date)
+          WHERE e.company_id = $1
+            AND ($3::text IS NULL OR lower(ev.display_name) LIKE '%' || lower($3) || '%'
+              OR lower(e.external_id) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%')
+            AND ($4::text IS NULL OR ev.department = $4)
+            AND ($5::text IS NULL OR ev.location = $5)
+            AND ($6::text IS NULL OR ev.employment_type = $6)
+            AND ($7::text IS NULL OR ev.attributes ->> 'employment_status' = $7)
+            AND ($8::boolean IS NULL OR ev.is_manager = $8)
+          ORDER BY ${order}
+          LIMIT $9 OFFSET $10
+       ), policy_counts AS (
+         SELECT assignments.employee_id, count(*)::int AS policy_count
+           FROM materialized_assignments assignments
+           JOIN page ON page.id = assignments.employee_id
+          WHERE assignments.company_id = $1
+          GROUP BY assignments.employee_id
+       )
+       SELECT page.id, page.external_id, page.version_id, page.version, page.valid_from,
+              page.display_name, page.email, page.location, page.department, page.employment_type,
+              page.is_manager, page.hire_date, page.attributes, page.last_changed,
+              COALESCE(policy_counts.policy_count, 0) AS policy_count
+         FROM page
+         LEFT JOIN policy_counts ON policy_counts.employee_id = page.id
+        ORDER BY ${pageOrder}`,
+        [...parameters, query.limit, query.offset],
+      ),
+      pool.query<{ total: number }>(
+        `SELECT count(*)::int AS total
+           FROM employees e
+           JOIN employee_versions ev ON ev.employee_id = e.id AND ev.company_id = e.company_id
+            AND ev.valid_from <= $2::date AND (ev.valid_to IS NULL OR ev.valid_to > $2::date)
+          WHERE e.company_id = $1
+            AND ($3::text IS NULL OR lower(ev.display_name) LIKE '%' || lower($3) || '%'
+              OR lower(e.external_id) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%')
+            AND ($4::text IS NULL OR ev.department = $4)
+            AND ($5::text IS NULL OR ev.location = $5)
+            AND ($6::text IS NULL OR ev.employment_type = $6)
+            AND ($7::text IS NULL OR ev.attributes ->> 'employment_status' = $7)
+            AND ($8::boolean IS NULL OR ev.is_manager = $8)`,
+        parameters,
+      ),
+      query.facets === 'false' ? Promise.resolve({ rows: [] }) : pool.query<{
+        departments: string[]; locations: string[]; employment_types: string[]; employment_statuses: string[];
+      }>(
+        `SELECT
+           COALESCE(array_agg(DISTINCT ev.department ORDER BY ev.department)
+             FILTER (WHERE ev.department IS NOT NULL), '{}') AS departments,
+           COALESCE(array_agg(DISTINCT ev.location ORDER BY ev.location)
+             FILTER (WHERE ev.location IS NOT NULL), '{}') AS locations,
+           COALESCE(array_agg(DISTINCT ev.employment_type ORDER BY ev.employment_type)
+             FILTER (WHERE ev.employment_type IS NOT NULL), '{}') AS employment_types,
+           COALESCE(array_agg(DISTINCT ev.attributes ->> 'employment_status' ORDER BY ev.attributes ->> 'employment_status')
+             FILTER (WHERE NULLIF(ev.attributes ->> 'employment_status', '') IS NOT NULL), '{}') AS employment_statuses
          FROM employees e
          JOIN employee_versions ev ON ev.employee_id = e.id AND ev.company_id = e.company_id
           AND ev.valid_from <= $2::date AND (ev.valid_to IS NULL OR ev.valid_to > $2::date)
-        WHERE e.company_id = $1
-          AND ($3::text IS NULL OR ev.display_name ILIKE '%' || $3 || '%'
-            OR e.external_id ILIKE '%' || $3 || '%' OR COALESCE(ev.email, '') ILIKE '%' || $3 || '%')
-          AND ($4::text IS NULL OR ev.department = $4)
-          AND ($5::text IS NULL OR ev.location = $5)
-          AND ($6::text IS NULL OR ev.employment_type = $6)
-          AND ($7::boolean IS NULL OR ev.is_manager = $7)
-        ORDER BY ${order}
-        LIMIT $8 OFFSET $9`,
-      [
-        companyId,
-        todayUtc(clock),
-        query.search?.trim() || null,
-        query.department ?? null,
-        query.location ?? null,
-        query.employmentType ?? null,
-        query.manager === undefined ? null : query.manager === 'true',
-        query.limit,
-        query.offset,
-      ],
-    );
-    const facets = query.facets === 'false' ? { rows: [] } : await pool.query<{
-      departments: string[]; locations: string[]; employment_types: string[];
-    }>(
-      `SELECT
-         COALESCE(array_agg(DISTINCT ev.department ORDER BY ev.department)
-           FILTER (WHERE ev.department IS NOT NULL), '{}') AS departments,
-         COALESCE(array_agg(DISTINCT ev.location ORDER BY ev.location)
-           FILTER (WHERE ev.location IS NOT NULL), '{}') AS locations,
-         COALESCE(array_agg(DISTINCT ev.employment_type ORDER BY ev.employment_type)
-           FILTER (WHERE ev.employment_type IS NOT NULL), '{}') AS employment_types
-       FROM employees e
-       JOIN employee_versions ev ON ev.employee_id = e.id AND ev.company_id = e.company_id
-        AND ev.valid_from <= $2::date AND (ev.valid_to IS NULL OR ev.valid_to > $2::date)
-      WHERE e.company_id = $1`,
-      [companyId, todayUtc(clock)],
-    );
-    const total = Number((result.rows[0] as { total_count?: number } | undefined)?.total_count ?? 0);
+        WHERE e.company_id = $1`,
+        [companyId, todayUtc(clock)],
+      ),
+    ]);
+    const total = totalResult.rows[0]?.total ?? 0;
     return {
-      data: result.rows.map((row) => {
-        const { total_count: _totalCount, ...employee } = row as Record<string, unknown>;
-        return employee;
-      }),
+      data: result.rows,
       meta: { total, limit: query.limit, offset: query.offset },
-      facets: facets.rows[0] ?? { departments: [], locations: [], employment_types: [] },
+      facets: facets.rows[0] ?? { departments: [], locations: [], employment_types: [], employment_statuses: [] },
     };
   });
 

@@ -6,7 +6,7 @@ const snapshot: EmployeeSnapshot = {
   companyId: 'company-1',
   versionId: 'version-1',
   externalId: 'E-1',
-  email: 'employee@example.test',
+  email: 'employee@example.com',
   location: 'CA',
   department: 'Engineering',
   employmentType: 'full_time',

@@ -2,7 +2,7 @@
 
 A production-minded, generic policy assignment system built as a TypeScript modular monolith with PostgreSQL. It versions source data, incrementally reconciles only impacted employee/category scopes, materializes product reads, records complete decisions, schedules date transitions, and previews rule changes through the same evaluator and resolver used in production.
 
-The engine has no Warp-specific policy names or business rules. For reviewer usability, local and Render startup create one clearly labelled **Policy Assignment Demo** workspace with 24 fictional employees, 6 categories, 15 policies, 15 rules, 4 groups, intentional conflicts, and 2 manual exceptions. That workspace is isolated from the 50,000-record NYC evaluation tenant and is created through the real API, job, worker, and reconciliation path.
+The engine has no Warp-specific policy names or business rules. The default reviewer product is **NYC Open Data Policy Workspace**, an isolated tenant containing the same 50,000 normalized employee facts persisted by the NYC importer. Its small policy/rule set is labelled **Evaluation / demonstration policy configuration** and must not be interpreted as official NYC policy. The reviewer tenant is separate from the certified evaluation tenant, so normal UI edits cannot alter the certified evidence.
 
 ## What is implemented
 
@@ -35,11 +35,19 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open <http://localhost:3000/admin/>. The **Policy Assignment Demo** workspace is ready to review; the API health endpoint is <http://localhost:3000/health>.
+The persisted PostgreSQL volume must already contain the 50,000-row NYC import. If it does not, run the importer once before starting the full stack. The reviewer seed never calls the NYC API:
+
+```bash
+docker compose run --rm migrate
+docker compose run --rm migrate npm run data:nyc:start
+docker compose up --build
+```
+
+Open <http://localhost:3000/admin/>. **NYC Open Data Policy Workspace** is the default; the API health endpoint is <http://localhost:3000/health>.
 
 The focused reviewer journey is: Policies (what can be assigned) → Rules (who receives them) → Employees (which facts matched) → Why (how the winner was selected) → edit impact (what changes before saving) → Audit (what happened and why). Categories live inside Policies, manual overrides live on Employee detail, and technical reconciliation records are available only inside Audit's advanced disclosure. Employee and rule previews call backend services that use the production evaluator/resolver—there is no browser-side rule engine.
 
-PostgreSQL data persists in the `policy-postgres` volume. Compose runs migrations and the idempotent demo seed before the API and background worker start.
+PostgreSQL data persists in the `policy-postgres` volume. Compose runs migrations and the idempotent reviewer seed before the API and background worker start. Seeding copies persisted `employee_import_records` set-wise into the reviewer tenant and does not perform a network request.
 
 ## Local development
 
@@ -50,7 +58,8 @@ docker compose up -d postgres
 npm ci
 cp .env.example .env
 npm run db:migrate
-npm run seed:demo
+npm run data:nyc       # once, only when PostgreSQL does not already contain the import
+npm run seed:reviewer  # offline copy from persisted import facts
 npm run dev
 ```
 
@@ -139,7 +148,7 @@ npm run eval:regression -- --seed=482901 --reuse-prepared              # resume 
 
 `--reuse-prepared` is guarded: it only requeues the baseline FULL job when the imported source universe still has version 1 facts, zero manual controls, the expected 300 rules, and no unrelated active jobs. Once mutations have begun, a deterministic rebuild is required. Evaluation tenants are excluded from unscoped production workers; the runner's company-scoped worker is the only process that claims their jobs.
 
-Evaluation tenants are also excluded from `GET /companies`, so the NYC population never appears as a normal reviewer workspace. `npm run seed:demo` is idempotent: it accepts an already-complete demo workspace and fails explicitly rather than silently repairing or overwriting a partial/customized one.
+Evaluation tenants are excluded from `GET /companies`. `npm run seed:reviewer` creates a separate normal reviewer tenant from the immutable `employee_import_records.normalized_facts` baseline, copies provenance into a reviewer-owned import record, and drains one full reconciliation job. It accepts an already-complete reviewer workspace and fails explicitly rather than overwriting reviewer edits. Normal employee edits create new versions only in the reviewer tenant.
 
 ## Rule representation
 
@@ -198,7 +207,7 @@ The complete workflow and endpoint list are in [docs/API.md](docs/API.md).
 
 ## Correctness evidence
 
-The current suite contains 35 focused tests. The in-memory randomized harness runs **100 deterministic scenarios**, each with **30–60 mutations** across employee fields, groups, rule priority/state, overrides, and time. After every mutation it compares dependency-scoped materialization to an independently implemented full interpreter/resolver, then repeats the same scope to prove retry idempotency. The PostgreSQL regression command above supplies the separate 50,000-employee/100,000-mutation evidence.
+The current suite contains 36 focused tests. The in-memory randomized harness runs **100 deterministic scenarios**, each with **30–60 mutations** across employee fields, groups, rule priority/state, overrides, and time. After every mutation it compares dependency-scoped materialization to an independently implemented full interpreter/resolver, then repeats the same scope to prove retry idempotency. The PostgreSQL regression command above supplies the separate 50,000-employee/100,000-mutation evidence.
 
 The PostgreSQL suite covers exact preview, manual precedence, rejected-candidate explanations, effective-dated history stability, group impact, tenant isolation, concurrent reconciliation serialization, duplicate retry safety, and a persisted tenure transition with no source-row mutation.
 
@@ -217,11 +226,11 @@ To deploy:
 
 1. Push this repository to GitHub.
 2. In Render, choose **New → Blueprint** and select the repository.
-3. Review the three resources from `render.yaml` and apply the Blueprint. The web pre-deploy command runs migrations and seeds the reviewer workspace.
+3. Ensure the private PostgreSQL database already contains the NYC import, then review the three resources from `render.yaml` and apply the Blueprint. The web pre-deploy command runs migrations and seeds the isolated reviewer workspace without fetching NYC.
 4. Wait for both `policy-assignment-engine-web` and `policy-assignment-engine-worker` to become live.
-5. Open `https://YOUR-WEB-SERVICE.onrender.com/admin/`, select **Policy Assignment Demo**, and verify `/health` returns `{ "status": "ok" }`.
+5. Open `https://YOUR-WEB-SERVICE.onrender.com/admin/`, select **NYC Open Data Policy Workspace**, and verify `/health` returns `{ "status": "ok" }`.
 
-`DATABASE_URL` is wired from the private database by the Blueprint. Render supplies `PORT`; the application binds `HOST=0.0.0.0`. No NYC token or imported evaluation population is required for the reviewer product flow. For a production organization, place the service behind an authenticated admin gateway that authorizes the company context; `X-Company-Id` is tenant isolation, not authentication.
+`DATABASE_URL` is wired from the private database by the Blueprint. Render supplies `PORT`; the application binds `HOST=0.0.0.0`. The NYC network import is a one-time data preparation step, never an application-load path. For a production organization, place the service behind an authenticated admin gateway that authorizes the company context; `X-Company-Id` is tenant isolation, not authentication.
 
 ## Operational notes
 
