@@ -1,6 +1,7 @@
 import type { DbPool } from '../db.js';
 import { AppError, notFound } from '../errors.js';
 import { compileRule, type ConditionTrace, type EmployeeSnapshot, type RuleCondition } from '../domain/rules.js';
+import { employeePresentation } from '../presentation/employees.js';
 import { PolicyEvaluator, type EvaluatableOverride, type EvaluatableRule } from './evaluation.js';
 import {
   listCategoryIds,
@@ -23,6 +24,7 @@ interface EmployeeRow {
   is_manager: boolean;
   hire_date: string | null;
   attributes: Record<string, unknown>;
+  is_imported: boolean;
   group_ids: string[];
 }
 
@@ -49,6 +51,8 @@ export interface PreviewResult {
   examples: Array<{
     employeeId: string;
     displayName: string;
+    contextLabel: string;
+    recordLabel: string;
     beforePolicyIds: string[];
     afterPolicyIds: string[];
     addedPolicyIds: string[];
@@ -94,8 +98,9 @@ export interface EmployeeAssignmentPreviewResult {
     name: string;
     cardinality: 'SINGLE' | 'MULTIPLE';
     changed: boolean;
-    before: PreviewPolicy[];
+    before: PreviewCandidate[];
     after: PreviewCandidate[];
+    removed: Array<{ candidate: PreviewCandidate; reason: string; trace?: readonly ConditionTrace[] }>;
     candidates: PreviewCandidate[];
     rejected: Array<{ candidate: PreviewCandidate; reason: string; wonByCandidateId?: string }>;
   }>;
@@ -121,6 +126,14 @@ export class PreviewService {
     hireDate?: string | null;
     attributes?: Record<string, unknown>;
     groupIds?: string[];
+    proposedOverride?: {
+      policyId: string;
+      action: 'ASSIGN' | 'EXCLUDE';
+      priority: number;
+      reason: string;
+      validFrom: string;
+      validTo: string | null;
+    };
   }): Promise<EmployeeAssignmentPreviewResult> {
     const existing = input.employeeId === undefined
       ? null
@@ -149,7 +162,7 @@ export class PreviewService {
       groupIds: new Set(groupIds),
       asOfDate: input.asOfDate,
     };
-    const [categoryIds, policyResult, assignmentResult] = await Promise.all([
+    const [categoryIds, policyResult, proposedOverridePolicy] = await Promise.all([
       listCategoryIds(this.pool, input.companyId),
       this.pool.query<{
         id: string; key: string; name: string; category_id: string; category_key: string; category_name: string;
@@ -163,16 +176,14 @@ export class PreviewService {
           ORDER BY pc.name, pv.name, p.id`,
         [input.companyId, input.asOfDate],
       ),
-      input.employeeId === undefined
-        ? Promise.resolve({ rows: [] } as { rows: Array<{ category_id: string; policy_id: string }> })
-        : this.pool.query<{ category_id: string; policy_id: string }>(
-          `SELECT category_id, policy_id
-             FROM materialized_assignments
-            WHERE company_id = $1 AND employee_id = $2
-            ORDER BY category_id, policy_id`,
-          [input.companyId, input.employeeId],
+      input.proposedOverride === undefined
+        ? Promise.resolve(null)
+        : this.pool.query<{ category_id: string }>(
+          'SELECT category_id FROM policies WHERE company_id = $1 AND id = $2',
+          [input.companyId, input.proposedOverride.policyId],
         ),
     ]);
+    if (input.proposedOverride !== undefined && proposedOverridePolicy?.rows[0] === undefined) throw notFound('Policy');
     const policies = new Map<string, PreviewPolicy>(policyResult.rows.map((row) => [row.id, {
       id: row.id,
       key: row.key,
@@ -181,7 +192,6 @@ export class PreviewService {
       categoryKey: row.category_key,
       categoryName: row.category_name,
     }]));
-    const beforeByCategory = groupRows(assignmentResult.rows, (row) => row.category_id);
     const categories: EmployeeAssignmentPreviewResult['categories'] = [];
     let assignmentsAdded = 0;
     let assignmentsRemoved = 0;
@@ -196,18 +206,34 @@ export class PreviewService {
           : loadOverridesForCategory(this.pool, input.companyId, input.employeeId, categoryId, input.asOfDate),
       ]);
       if (category === null) continue;
-      const evaluation = this.evaluator.evaluateCategory({
+      const afterOverrides = [...overrides];
+      if (input.proposedOverride !== undefined && proposedOverridePolicy?.rows[0]?.category_id === categoryId) {
+        afterOverrides.push({
+          id: `preview-manual-${input.proposedOverride.policyId}`,
+          policyId: input.proposedOverride.policyId,
+          categoryId,
+          action: input.proposedOverride.action,
+          priority: input.proposedOverride.priority,
+          reason: input.proposedOverride.reason,
+          validFrom: input.proposedOverride.validFrom,
+          validTo: input.proposedOverride.validTo,
+        });
+      }
+      const afterEvaluation = this.evaluator.evaluateCategory({
         snapshot,
+        categoryId,
+        cardinality: category.cardinality,
+        rules,
+        overrides: afterOverrides,
+      });
+      const beforeEvaluation = existing === null ? null : this.evaluator.evaluateCategory({
+        snapshot: existing,
         categoryId,
         cardinality: category.cardinality,
         rules,
         overrides,
       });
-      const before = (beforeByCategory.get(categoryId) ?? [])
-        .map((row) => policies.get(row.policy_id))
-        .filter((policy): policy is PreviewPolicy => policy !== undefined)
-        .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
-      const enrich = (candidate: (typeof evaluation.candidates)[number]): PreviewCandidate => {
+      const enrich = (candidate: (typeof afterEvaluation.candidates)[number]): PreviewCandidate => {
         const policy = policies.get(candidate.policyId);
         if (policy === undefined) throw new Error(`Preview candidate references unknown policy ${candidate.policyId}`);
         return {
@@ -224,13 +250,28 @@ export class PreviewService {
           ...(candidate.reason === undefined ? {} : { reason: candidate.reason }),
         };
       };
-      const after = evaluation.winners.map(enrich);
+      const before = (beforeEvaluation?.winners ?? []).map(enrich);
+      const after = afterEvaluation.winners.map(enrich);
       const beforeIds = new Set(before.map((policy) => policy.id));
       const afterIds = new Set(after.map((policy) => policy.id));
       const added = after.filter((policy) => !beforeIds.has(policy.id)).length;
       const removed = before.filter((policy) => !afterIds.has(policy.id)).length;
       const unchanged = after.filter((policy) => beforeIds.has(policy.id)).length;
       const changed = added > 0 || removed > 0;
+      const removedDetails = before.filter((candidate) => !afterIds.has(candidate.id)).map((candidate) => {
+        const rejected = afterEvaluation.rejected.find((item) => item.candidate.candidateId === candidate.candidateId);
+        if (rejected !== undefined) return { candidate, reason: rejected.reason };
+        const ruleResult = candidate.ruleVersionId === undefined
+          ? undefined
+          : afterEvaluation.ruleEvaluations.find((item) => item.ruleVersionId === candidate.ruleVersionId)?.result;
+        return {
+          candidate,
+          reason: ruleResult?.matched === false
+            ? 'The rule no longer matches the proposed employee state.'
+            : 'The candidate is not selected by the resolver for the proposed employee state.',
+          ...(ruleResult?.trace === undefined ? {} : { trace: ruleResult.trace }),
+        };
+      });
       assignmentsAdded += added;
       assignmentsRemoved += removed;
       assignmentsUnchanged += unchanged;
@@ -243,8 +284,9 @@ export class PreviewService {
         changed,
         before,
         after,
-        candidates: evaluation.candidates.map(enrich),
-        rejected: evaluation.rejected.map((item) => ({
+        removed: removedDetails,
+        candidates: afterEvaluation.candidates.map(enrich),
+        rejected: afterEvaluation.rejected.map((item) => ({
           candidate: enrich(item.candidate),
           reason: item.reason,
           ...(item.wonByCandidateId === undefined ? {} : { wonByCandidateId: item.wonByCandidateId }),
@@ -322,7 +364,7 @@ export class PreviewService {
     }
     const compiled = compileRule(input.condition);
     const existingRules = await loadRulesForCategory(this.pool, input.companyId, categoryId, input.asOfDate);
-    const rules = existingRules.filter((rule) => input.ruleId === undefined || rule.ruleId !== input.ruleId);
+    const afterRules = existingRules.filter((rule) => input.ruleId === undefined || rule.ruleId !== input.ruleId);
     const proposed: EvaluatableRule = {
       ruleId: input.ruleId ?? '00000000-0000-0000-0000-000000000000',
       ruleVersionId: `preview-${compiled.contentHash}`,
@@ -337,7 +379,7 @@ export class PreviewService {
       specificity: compiled.specificity,
       policyEnabled: true,
     };
-    rules.push(proposed);
+    afterRules.push(proposed);
 
     const totals: PreviewResult = {
       employeesEvaluated: 0,
@@ -363,7 +405,8 @@ export class PreviewService {
         ...input,
         categoryId,
         cardinality: category.cardinality,
-        rules,
+        beforeRules: existingRules,
+        afterRules,
         proposedRuleVersionId: proposed.ruleVersionId,
         employeeIds: batchIds,
         totals,
@@ -378,18 +421,20 @@ export class PreviewService {
     asOfDate: string;
     categoryId: string;
     cardinality: 'SINGLE' | 'MULTIPLE';
-    rules: EvaluatableRule[];
+    beforeRules: EvaluatableRule[];
+    afterRules: EvaluatableRule[];
     proposedRuleVersionId: string;
     employeeIds: string[];
     totals: PreviewResult;
     exampleLimit: number;
   }): Promise<void> {
     if (input.employeeIds.length === 0) return;
-    const [employeeResult, overrideResult, assignmentResult] = await Promise.all([
+    const [employeeResult, overrideResult] = await Promise.all([
       this.pool.query<EmployeeRow>(
         `SELECT e.id, e.company_id, ev.id AS version_id, e.external_id, ev.display_name,
                 ev.email, ev.location, ev.department, ev.employment_type, ev.is_manager,
                 ev.hire_date::text, ev.attributes,
+                imported.employee_id IS NOT NULL AS is_imported,
                 COALESCE(array_agg(gm.group_id::text ORDER BY gm.group_id)
                   FILTER (WHERE gm.group_id IS NOT NULL), '{}') AS group_ids
            FROM employees e
@@ -399,8 +444,10 @@ export class PreviewService {
            LEFT JOIN group_memberships gm
              ON gm.company_id = e.company_id AND gm.employee_id = e.id
             AND gm.valid_from <= $3::date AND (gm.valid_to IS NULL OR gm.valid_to > $3::date)
+           LEFT JOIN employee_import_records imported
+             ON imported.company_id = e.company_id AND imported.employee_id = e.id
           WHERE e.company_id = $1 AND e.id = ANY($2::uuid[])
-          GROUP BY e.id, ev.id
+          GROUP BY e.id, ev.id, imported.employee_id
           ORDER BY e.id`,
         [input.companyId, input.employeeIds, input.asOfDate],
       ),
@@ -416,16 +463,8 @@ export class PreviewService {
           ORDER BY mo.employee_id, mo.id`,
         [input.companyId, input.employeeIds, input.categoryId, input.asOfDate],
       ),
-      this.pool.query<{ employee_id: string; policy_id: string }>(
-        `SELECT employee_id, policy_id
-           FROM materialized_assignments
-          WHERE company_id = $1 AND employee_id = ANY($2::uuid[]) AND category_id = $3
-          ORDER BY employee_id, policy_id`,
-        [input.companyId, input.employeeIds, input.categoryId],
-      ),
     ]);
     const overrides = groupRows(overrideResult.rows, (row) => row.employee_id);
-    const assignments = groupRows(assignmentResult.rows, (row) => row.employee_id);
     for (const row of employeeResult.rows) {
       const snapshot: EmployeeSnapshot = {
         id: row.id,
@@ -452,18 +491,25 @@ export class PreviewService {
         validFrom: override.valid_from,
         validTo: override.valid_to,
       }));
-      const evaluation = this.evaluator.evaluateCategory({
+      const beforeEvaluation = this.evaluator.evaluateCategory({
         snapshot,
         categoryId: input.categoryId,
         cardinality: input.cardinality,
-        rules: input.rules,
+        rules: input.beforeRules,
         overrides: employeeOverrides,
       });
-      if (evaluation.candidates.some((candidate) => candidate.ruleVersionId === input.proposedRuleVersionId)) {
+      const afterEvaluation = this.evaluator.evaluateCategory({
+        snapshot,
+        categoryId: input.categoryId,
+        cardinality: input.cardinality,
+        rules: input.afterRules,
+        overrides: employeeOverrides,
+      });
+      if (afterEvaluation.candidates.some((candidate) => candidate.ruleVersionId === input.proposedRuleVersionId)) {
         input.totals.employeesMatched += 1;
       }
-      const before = (assignments.get(row.id) ?? []).map((assignment) => assignment.policy_id).sort();
-      const after = evaluation.winners.map((winner) => winner.policyId).sort();
+      const before = beforeEvaluation.winners.map((winner) => winner.policyId).sort();
+      const after = afterEvaluation.winners.map((winner) => winner.policyId).sort();
       const beforeSet = new Set(before);
       const afterSet = new Set(after);
       const added = after.filter((policyId) => !beforeSet.has(policyId));
@@ -478,9 +524,12 @@ export class PreviewService {
       input.totals.affectedEmployees += 1;
       if (added.length > 0 && removed.length > 0) input.totals.assignmentsChanged += 1;
       if (input.totals.examples.length < input.exampleLimit) {
+        const presentation = employeePresentation(row);
         input.totals.examples.push({
           employeeId: row.id,
-          displayName: row.display_name,
+          displayName: presentation.display_label,
+          contextLabel: presentation.context_label,
+          recordLabel: presentation.record_label,
           beforePolicyIds: before,
           afterPolicyIds: after,
           addedPolicyIds: added,

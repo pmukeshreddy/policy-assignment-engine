@@ -8,6 +8,7 @@ import type { DbPool } from '../db.js';
 import { inTransaction } from '../db.js';
 import { todayUtc } from '../domain/dates.js';
 import { AppError, conflict, notFound } from '../errors.js';
+import { employeePresentation, presentEmployee } from '../presentation/employees.js';
 import { enqueueJob } from '../services/jobs.js';
 import { PreviewService } from '../services/preview.js';
 import { companyIdFrom, compileRule, idParam, insertRuleDependencies } from './helpers.js';
@@ -25,6 +26,34 @@ import {
   ruleVersionInputSchema,
   uuidSchema,
 } from './schemas.js';
+
+function presentEmployeeReference(row: Record<string, unknown>): Record<string, unknown> {
+  const {
+    employee_external_id: externalId,
+    employee_display_name: displayName,
+    employee_department: department,
+    employee_location: location,
+    employee_attributes: attributes,
+    employee_is_imported: isImported,
+    ...rest
+  } = row;
+  if (typeof externalId !== 'string' || typeof displayName !== 'string') return rest;
+  const presentation = employeePresentation({
+    external_id: externalId,
+    display_name: displayName,
+    department: typeof department === 'string' ? department : null,
+    location: typeof location === 'string' ? location : null,
+    attributes: typeof attributes === 'object' && attributes !== null ? attributes as Record<string, unknown> : {},
+    is_imported: isImported === true,
+  });
+  return {
+    ...rest,
+    employee_name: presentation.display_label,
+    employee_context: presentation.context_label,
+    employee_record_label: presentation.record_label,
+    employee_is_anonymized: presentation.is_anonymized,
+  };
+}
 
 export function buildApp(input: {
   pool: DbPool;
@@ -80,12 +109,12 @@ export function buildApp(input: {
   app.get('/companies', async () => {
     const result = await input.pool.query(
       `SELECT c.id, c.name, c.created_at,
-              CASE WHEN reviewer.company_id IS NULL THEN 'STANDARD' ELSE 'NYC_OPEN_DATA_REVIEWER' END AS workspace_kind,
-              reviewer.imported_employee_count
+              CASE WHEN workspace.company_id IS NULL THEN 'STANDARD' ELSE 'NYC_OPEN_DATA_PRODUCT' END AS workspace_kind,
+              workspace.imported_employee_count
          FROM companies c
-         LEFT JOIN reviewer_workspaces reviewer ON reviewer.company_id = c.id
+         LEFT JOIN product_workspaces workspace ON workspace.company_id = c.id
         WHERE NOT EXISTS (SELECT 1 FROM evaluation_tenants evaluation WHERE evaluation.company_id = c.id)
-        ORDER BY CASE WHEN reviewer.company_id IS NULL THEN 1 ELSE 0 END, c.created_at, c.id`,
+        ORDER BY CASE WHEN workspace.company_id IS NULL THEN 1 ELSE 0 END, c.created_at, c.id`,
     );
     return { data: result.rows };
   });
@@ -140,6 +169,27 @@ export function buildApp(input: {
     });
   });
 
+  app.post('/manual-overrides/preview', async (request) => {
+    const companyId = companyIdFrom(request);
+    const raw = request.body as Record<string, unknown>;
+    const body = overrideInputSchema.parse(raw);
+    const asOfDate = z.object({ asOfDate: z.string().date().optional() }).parse(raw).asOfDate ?? todayUtc(clock);
+    const validFrom = body.validFrom ?? asOfDate;
+    return preview.previewEmployee({
+      companyId,
+      employeeId: body.employeeId,
+      asOfDate,
+      proposedOverride: {
+        policyId: body.policyId,
+        action: body.action,
+        priority: body.priority,
+        reason: body.reason,
+        validFrom,
+        validTo: body.validTo ?? null,
+      },
+    });
+  });
+
   app.post('/reconciliation/trigger', async (request, reply) => {
     const companyId = companyIdFrom(request);
     const jobId = await inTransaction(input.pool, (client) =>
@@ -186,7 +236,13 @@ export function buildApp(input: {
     const [employees, rules, assignments, overrides, jobs] = await Promise.all([
       input.pool.query(
         `SELECT current.id, current.created_at AS occurred_at, e.id AS employee_id,
-                current.display_name AS employee_name, current.version, current.changed_fields,
+                e.external_id AS employee_external_id,
+                current.display_name AS employee_display_name,
+                current.department AS employee_department,
+                current.location AS employee_location,
+                current.attributes AS employee_attributes,
+                imported.employee_id IS NOT NULL AS employee_is_imported,
+                current.version, current.changed_fields,
                 jsonb_build_object(
                   'location', previous.location,
                   'department', previous.department,
@@ -209,6 +265,8 @@ export function buildApp(input: {
             AND previous.employee_id = current.employee_id
             AND previous.version = current.version - 1
            JOIN employees e ON e.company_id = current.company_id AND e.id = current.employee_id
+           LEFT JOIN employee_import_records imported
+             ON imported.company_id = e.company_id AND imported.employee_id = e.id
           WHERE current.company_id = $1
           ORDER BY current.created_at DESC, current.id DESC
           LIMIT $2`,
@@ -257,13 +315,21 @@ export function buildApp(input: {
             WHERE ad.company_id = $1
          )
          SELECT ordered.id, ordered.decided_at AS occurred_at, ordered.employee_id,
-                ev.display_name AS employee_name, pc.name AS category_name,
+                e.external_id AS employee_external_id,
+                ev.display_name AS employee_display_name,
+                ev.department AS employee_department,
+                ev.location AS employee_location,
+                ev.attributes AS employee_attributes,
+                imported.employee_id IS NOT NULL AS employee_is_imported,
+                pc.name AS category_name,
                 COALESCE(previous_names.names, '{}') AS before,
                 COALESCE(current_names.names, '{}') AS after,
                 ma.id AS assignment_id, ordered.reconciliation_job_id
            FROM ordered
            JOIN employees e ON e.company_id = $1 AND e.id = ordered.employee_id
            JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.id = e.current_version_id
+           LEFT JOIN employee_import_records imported
+             ON imported.company_id = e.company_id AND imported.employee_id = e.id
            JOIN policy_categories pc ON pc.company_id = $1 AND pc.id = ordered.category_id
            LEFT JOIN LATERAL (
              SELECT assignment.id
@@ -292,12 +358,20 @@ export function buildApp(input: {
       ),
       input.pool.query(
         `SELECT mo.id, COALESCE(mo.revoked_at, mo.created_at) AS occurred_at,
-                mo.employee_id, ev.display_name AS employee_name, pv.name AS policy_name,
+                mo.employee_id, e.external_id AS employee_external_id,
+                ev.display_name AS employee_display_name,
+                ev.department AS employee_department,
+                ev.location AS employee_location,
+                ev.attributes AS employee_attributes,
+                imported.employee_id IS NOT NULL AS employee_is_imported,
+                pv.name AS policy_name,
                 pc.name AS category_name, mo.action, mo.reason, mo.valid_from, mo.valid_to,
                 mo.created_at, mo.revoked_at
            FROM manual_overrides mo
            JOIN employees e ON e.company_id = mo.company_id AND e.id = mo.employee_id
            JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.id = e.current_version_id
+           LEFT JOIN employee_import_records imported
+             ON imported.company_id = e.company_id AND imported.employee_id = e.id
            JOIN policies p ON p.company_id = mo.company_id AND p.id = mo.policy_id
            JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
            JOIN policy_categories pc ON pc.company_id = p.company_id AND pc.id = p.category_id
@@ -319,10 +393,10 @@ export function buildApp(input: {
       ),
     ]);
     return {
-      employeeChanges: employees.rows,
+      employeeChanges: employees.rows.map((row) => presentEmployeeReference(row as Record<string, unknown>)),
       ruleChanges: rules.rows,
-      assignmentChanges: assignments.rows,
-      overrides: overrides.rows,
+      assignmentChanges: assignments.rows.map((row) => presentEmployeeReference(row as Record<string, unknown>)),
+      overrides: overrides.rows.map((row) => presentEmployeeReference(row as Record<string, unknown>)),
       technical: { reconciliationJobs: jobs.rows },
     };
   });
@@ -332,6 +406,8 @@ export function buildApp(input: {
     const counts = await input.pool.query(
       `SELECT
         (SELECT count(*)::int FROM employees WHERE company_id = $1) AS employees,
+        (SELECT count(*)::int FROM policies WHERE company_id = $1) AS policies,
+        (SELECT count(*)::int FROM rules WHERE company_id = $1) AS rules,
         (SELECT count(*)::int FROM policies p
           JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
           WHERE p.company_id = $1 AND pv.enabled) AS active_policies,
@@ -351,21 +427,23 @@ export function buildApp(input: {
       [companyId],
     );
     const source = await input.pool.query(
-      `SELECT reviewer.dataset_id,
-              reviewer.imported_employee_count,
-              reviewer.policy_configuration_kind,
+      `SELECT workspace.dataset_id,
+              workspace.imported_employee_count,
+              workspace.baseline_fingerprint,
+              workspace.baseline_rule_seed,
+              workspace.baseline_rule_count,
               imported.source_url,
               imported.fetched_at,
               imported.checksum,
               imported.metadata ->> 'fiscalYear' AS fiscal_year,
               (SELECT count(*)::int FROM employee_import_records records
-                WHERE records.company_id = reviewer.company_id
-                  AND records.import_id = reviewer.reviewer_import_id) AS provenance_records
-         FROM reviewer_workspaces reviewer
+                WHERE records.company_id = workspace.company_id
+                  AND records.import_id = workspace.product_import_id) AS provenance_records
+         FROM product_workspaces workspace
          JOIN dataset_imports imported
-           ON imported.company_id = reviewer.company_id
-          AND imported.id = reviewer.reviewer_import_id
-        WHERE reviewer.company_id = $1`,
+           ON imported.company_id = workspace.company_id
+          AND imported.id = workspace.product_import_id
+        WHERE workspace.company_id = $1`,
       [companyId],
     );
     return {
@@ -382,8 +460,13 @@ async function loadActivity(pool: DbPool, companyId: string, limit: number): Pro
   const result = await pool.query(
     `SELECT j.id, j.event_type, j.scope, j.payload, j.status, j.attempts,
             j.created_at, j.started_at, j.finished_at,
-            COALESCE(ev.display_name, r.key, pv.name, g.name) AS entity_name,
-            ev.display_name AS employee_name,
+            COALESCE(r.key, pv.name, g.name) AS non_employee_entity_name,
+            e.external_id AS employee_external_id,
+            ev.display_name AS employee_display_name,
+            ev.department AS employee_department,
+            ev.location AS employee_location,
+            ev.attributes AS employee_attributes,
+            imported.employee_id IS NOT NULL AS employee_is_imported,
             r.key AS rule_key,
             pv.name AS policy_name,
             g.name AS group_name,
@@ -396,6 +479,8 @@ async function loadActivity(pool: DbPool, companyId: string, limit: number): Pro
        LEFT JOIN employees e ON j.payload ? 'employeeId' AND e.company_id = j.company_id
         AND e.id = (j.payload->>'employeeId')::uuid
        LEFT JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.id = e.current_version_id
+       LEFT JOIN employee_import_records imported
+         ON imported.company_id = e.company_id AND imported.employee_id = e.id
        LEFT JOIN rule_versions rv ON j.payload ? 'ruleVersionId' AND rv.company_id = j.company_id
         AND rv.id = (j.payload->>'ruleVersionId')::uuid
        LEFT JOIN rules r ON r.company_id = rv.company_id AND r.id = rv.rule_id
@@ -415,7 +500,13 @@ async function loadActivity(pool: DbPool, companyId: string, limit: number): Pro
       LIMIT $2`,
     [companyId, limit],
   );
-  return result.rows as Record<string, unknown>[];
+  return result.rows.map((raw) => {
+    const row = presentEmployeeReference(raw as Record<string, unknown>);
+    return {
+      ...row,
+      entity_name: row['employee_name'] ?? row['non_employee_entity_name'],
+    };
+  });
 }
 
 function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () => Date): void {
@@ -500,8 +591,14 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       limit: z.coerce.number().int().min(1).max(1_000).default(100),
       offset: z.coerce.number().int().min(0).default(0),
     }).parse(request.query);
+    const productWorkspace = query.sort === 'name'
+      ? await pool.query('SELECT 1 FROM product_workspaces WHERE company_id = $1', [companyId])
+      : { rowCount: 0 };
+    const nameSort = productWorkspace.rowCount === 1
+      ? `COALESCE(NULLIF(ev.attributes ->> 'job_title', ''), 'Employee')`
+      : 'ev.display_name';
     const sortColumns = {
-      name: ['ev.display_name', 'page.display_name'],
+      name: [nameSort, 'page.display_sort'],
       department: ['ev.department', 'page.department'],
       location: ['ev.location', 'page.location'],
       employmentType: ['ev.employment_type', 'page.employment_type'],
@@ -525,14 +622,21 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       `WITH page AS MATERIALIZED (
          SELECT e.id, e.external_id, ev.id AS version_id, ev.version, ev.valid_from,
                 ev.display_name, ev.email, ev.location, ev.department, ev.employment_type,
-                ev.is_manager, ev.hire_date, ev.attributes, e.updated_at AS last_changed
+                ev.is_manager, ev.hire_date, ev.attributes, e.updated_at AS last_changed,
+                imported.employee_id IS NOT NULL AS is_imported,
+                ${nameSort} AS display_sort
            FROM employees e
            JOIN employee_versions ev ON ev.employee_id = e.id AND ev.company_id = e.company_id
             AND ev.valid_from <= $2::date AND (ev.valid_to IS NULL OR ev.valid_to > $2::date)
+           LEFT JOIN employee_import_records imported
+             ON imported.company_id = e.company_id AND imported.employee_id = e.id
           WHERE e.company_id = $1
             AND ($3::text IS NULL OR lower(ev.display_name) LIKE '%' || lower($3) || '%'
               OR lower(e.external_id) LIKE '%' || lower($3) || '%'
-              OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%')
+              OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.attributes ->> 'job_title', '')) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.department, '')) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.location, '')) LIKE '%' || lower($3) || '%')
             AND ($4::text IS NULL OR ev.department = $4)
             AND ($5::text IS NULL OR ev.location = $5)
             AND ($6::text IS NULL OR ev.employment_type = $6)
@@ -550,7 +654,7 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
        SELECT page.id, page.external_id, page.version_id, page.version, page.valid_from,
               page.display_name, page.email, page.location, page.department, page.employment_type,
               page.is_manager, page.hire_date, page.attributes, page.last_changed,
-              COALESCE(policy_counts.policy_count, 0) AS policy_count
+              page.is_imported, COALESCE(policy_counts.policy_count, 0) AS policy_count
          FROM page
          LEFT JOIN policy_counts ON policy_counts.employee_id = page.id
         ORDER BY ${pageOrder}`,
@@ -564,7 +668,10 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
           WHERE e.company_id = $1
             AND ($3::text IS NULL OR lower(ev.display_name) LIKE '%' || lower($3) || '%'
               OR lower(e.external_id) LIKE '%' || lower($3) || '%'
-              OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%')
+              OR lower(COALESCE(ev.email, '')) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.attributes ->> 'job_title', '')) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.department, '')) LIKE '%' || lower($3) || '%'
+              OR lower(COALESCE(ev.location, '')) LIKE '%' || lower($3) || '%')
             AND ($4::text IS NULL OR ev.department = $4)
             AND ($5::text IS NULL OR ev.location = $5)
             AND ($6::text IS NULL OR ev.employment_type = $6)
@@ -593,7 +700,7 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
     ]);
     const total = totalResult.rows[0]?.total ?? 0;
     return {
-      data: result.rows,
+      data: result.rows.map((row) => presentEmployee(row as Parameters<typeof presentEmployee>[0])),
       meta: { total, limit: query.limit, offset: query.offset },
       facets: facets.rows[0] ?? { departments: [], locations: [], employment_types: [], employment_statuses: [] },
     };
@@ -606,20 +713,23 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
       `SELECT e.id, e.external_id, ev.id AS version_id, ev.version, ev.valid_from,
               ev.display_name, ev.email, ev.location, ev.department, ev.employment_type,
               ev.is_manager, ev.hire_date, ev.attributes,
+              imported.employee_id IS NOT NULL AS is_imported,
               COALESCE(jsonb_agg(jsonb_build_object('id', g.id, 'key', g.slug, 'name', g.name) ORDER BY g.name)
                 FILTER (WHERE g.id IS NOT NULL), '[]') AS groups
          FROM employees e
          JOIN employee_versions ev ON ev.employee_id = e.id AND ev.company_id = e.company_id
           AND ev.valid_from <= $3::date AND (ev.valid_to IS NULL OR ev.valid_to > $3::date)
+         LEFT JOIN employee_import_records imported
+           ON imported.company_id = e.company_id AND imported.employee_id = e.id
          LEFT JOIN group_memberships gm ON gm.company_id = e.company_id AND gm.employee_id = e.id
            AND gm.valid_from <= $3::date AND (gm.valid_to IS NULL OR gm.valid_to > $3::date)
          LEFT JOIN groups g ON g.company_id = gm.company_id AND g.id = gm.group_id
         WHERE e.company_id = $1 AND e.id = $2
-        GROUP BY e.id, ev.id`,
+        GROUP BY e.id, ev.id, imported.employee_id`,
       [companyId, employeeId, todayUtc(clock)],
     );
     if (result.rows[0] === undefined) throw notFound('Employee');
-    return result.rows[0];
+    return presentEmployee(result.rows[0] as Parameters<typeof presentEmployee>[0]);
   });
 
   app.get('/employees/:id/activity', async (request) => {
@@ -723,37 +833,97 @@ function registerEmployeeRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
         attributes: body.attributes ?? previous.attributes,
       };
       const changedFields = employeeChangedFields(previous, next);
-      if (changedFields.length === 0) return { id: employeeId, versionId: previous.version_id, changedFields };
-      await client.query('UPDATE employee_versions SET valid_to = $3::date WHERE company_id = $1 AND id = $2', [
-        companyId,
-        previous.version_id,
-        effectiveFrom,
-      ]);
-      await client.query('UPDATE employees SET updated_at = now() WHERE company_id = $1 AND id = $2', [companyId, employeeId]);
-      const version = await client.query<{ id: string }>(
-        `INSERT INTO employee_versions
-           (company_id, employee_id, version, valid_from, display_name, email, location, department,
-            employment_type, is_manager, hire_date, attributes, changed_fields)
-         VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11::date, $12::jsonb, $13)
-         RETURNING id`,
-        [
-          companyId, employeeId, previous.version + 1, effectiveFrom, next.displayName, next.email,
-          next.location, next.department, next.employmentType, next.isManager, next.hireDate,
-          JSON.stringify(next.attributes), changedFields,
-        ],
+      const activeMemberships = await client.query<{ id: string; group_id: string; valid_from: string }>(
+        `SELECT id, group_id, valid_from::text
+           FROM group_memberships
+          WHERE company_id = $1 AND employee_id = $2
+            AND valid_from <= $3::date AND (valid_to IS NULL OR valid_to > $3::date)
+          ORDER BY group_id
+          FOR UPDATE`,
+        [companyId, employeeId, effectiveFrom],
       );
-      await client.query('UPDATE employees SET current_version_id = $3 WHERE company_id = $1 AND id = $2', [
-        companyId, employeeId, version.rows[0]!.id,
-      ]);
-      await enqueueJob(client, {
-        companyId,
-        eventType: 'EMPLOYEE_UPDATED',
-        scope: 'EMPLOYEE',
-        payload: { employeeId, changedFields },
-        dedupeKey: `employee:${employeeId}:version:${previous.version + 1}`,
-        availableAt: effectiveFrom,
-      });
-      return { id: employeeId, versionId: version.rows[0]!.id, changedFields };
+      const currentGroupIds = new Set(activeMemberships.rows.map((membership) => membership.group_id));
+      const desiredGroupIds = body.groupIds === undefined ? currentGroupIds : new Set(body.groupIds);
+      if (body.groupIds !== undefined && desiredGroupIds.size > 0) {
+        const validGroups = await client.query<{ id: string }>(
+          'SELECT id FROM groups WHERE company_id = $1 AND id = ANY($2::uuid[]) FOR UPDATE',
+          [companyId, [...desiredGroupIds]],
+        );
+        if (validGroups.rows.length !== desiredGroupIds.size) {
+          throw new AppError('One or more groups do not belong to this company', 422, 'INVALID_REFERENCE');
+        }
+      }
+      const addedGroupIds = [...desiredGroupIds].filter((groupId) => !currentGroupIds.has(groupId)).sort();
+      const removedMemberships = activeMemberships.rows.filter((membership) => !desiredGroupIds.has(membership.group_id));
+      if (changedFields.length === 0 && addedGroupIds.length === 0 && removedMemberships.length === 0) {
+        return { id: employeeId, versionId: previous.version_id, changedFields, addedGroupIds: [], removedGroupIds: [] };
+      }
+      let versionId = previous.version_id;
+      if (changedFields.length > 0) {
+        await client.query('UPDATE employee_versions SET valid_to = $3::date WHERE company_id = $1 AND id = $2', [
+          companyId,
+          previous.version_id,
+          effectiveFrom,
+        ]);
+        const version = await client.query<{ id: string }>(
+          `INSERT INTO employee_versions
+             (company_id, employee_id, version, valid_from, display_name, email, location, department,
+              employment_type, is_manager, hire_date, attributes, changed_fields)
+           VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11::date, $12::jsonb, $13)
+           RETURNING id`,
+          [
+            companyId, employeeId, previous.version + 1, effectiveFrom, next.displayName, next.email,
+            next.location, next.department, next.employmentType, next.isManager, next.hireDate,
+            JSON.stringify(next.attributes), changedFields,
+          ],
+        );
+        versionId = version.rows[0]!.id;
+        await client.query(
+          'UPDATE employees SET current_version_id = $3, updated_at = now() WHERE company_id = $1 AND id = $2',
+          [companyId, employeeId, versionId],
+        );
+        await enqueueJob(client, {
+          companyId,
+          eventType: 'EMPLOYEE_UPDATED',
+          scope: 'EMPLOYEE',
+          payload: { employeeId, changedFields },
+          dedupeKey: `employee:${employeeId}:version:${previous.version + 1}`,
+          availableAt: effectiveFrom,
+        });
+      }
+      for (const groupId of addedGroupIds) {
+        const membership = await client.query<{ id: string }>(
+          `INSERT INTO group_memberships (company_id, group_id, employee_id, valid_from)
+           VALUES ($1, $2, $3, $4::date) RETURNING id`,
+          [companyId, groupId, employeeId, effectiveFrom],
+        );
+        await enqueueJob(client, {
+          companyId,
+          eventType: 'GROUP_MEMBERSHIP_ADDED',
+          scope: 'GROUP',
+          payload: { employeeId, groupId },
+          dedupeKey: `membership:${membership.rows[0]!.id}:added`,
+          availableAt: effectiveFrom,
+        });
+      }
+      for (const membership of removedMemberships) {
+        await client.query('UPDATE group_memberships SET valid_to = $2::date WHERE id = $1', [membership.id, effectiveFrom]);
+        await enqueueJob(client, {
+          companyId,
+          eventType: 'GROUP_MEMBERSHIP_REMOVED',
+          scope: 'GROUP',
+          payload: { employeeId, groupId: membership.group_id },
+          dedupeKey: `membership:${membership.id}:removed:${effectiveFrom}`,
+          availableAt: effectiveFrom,
+        });
+      }
+      return {
+        id: employeeId,
+        versionId,
+        changedFields,
+        addedGroupIds,
+        removedGroupIds: removedMemberships.map((membership) => membership.group_id),
+      };
     });
   });
 }
@@ -841,17 +1011,23 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
     );
     if (group.rows[0] === undefined) throw notFound('Group');
     const [members, dependentRules] = await Promise.all([pool.query(
-      `SELECT e.id, e.external_id, ev.display_name, ev.department, ev.location,
+      `SELECT e.id, e.external_id, ev.display_name, ev.department, ev.location, ev.attributes,
+              imported.employee_id IS NOT NULL AS is_imported,
               gm.valid_from, count(*) OVER()::int AS total_count
          FROM group_memberships gm
          JOIN employees e ON e.company_id = gm.company_id AND e.id = gm.employee_id
          JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.employee_id = e.id
           AND ev.valid_from <= $3::date AND (ev.valid_to IS NULL OR ev.valid_to > $3::date)
+         LEFT JOIN employee_import_records imported
+           ON imported.company_id = e.company_id AND imported.employee_id = e.id
         WHERE gm.company_id = $1 AND gm.group_id = $2
           AND gm.valid_from <= $3::date AND (gm.valid_to IS NULL OR gm.valid_to > $3::date)
           AND ($4::text IS NULL OR ev.display_name ILIKE '%' || $4 || '%'
-            OR e.external_id ILIKE '%' || $4 || '%')
-        ORDER BY ev.display_name, e.id
+            OR e.external_id ILIKE '%' || $4 || '%'
+            OR ev.attributes ->> 'job_title' ILIKE '%' || $4 || '%'
+            OR ev.department ILIKE '%' || $4 || '%'
+            OR ev.location ILIKE '%' || $4 || '%')
+        ORDER BY COALESCE(NULLIF(ev.attributes ->> 'job_title', ''), ev.display_name), e.id
         LIMIT $5 OFFSET $6`,
       [companyId, groupId, todayUtc(clock), query.search?.trim() || null, query.limit, query.offset],
     ), pool.query(
@@ -870,7 +1046,7 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
       ...group.rows[0] as Record<string, unknown>,
       members: members.rows.map((row) => {
         const { total_count: _totalCount, ...member } = row as Record<string, unknown>;
-        return member;
+        return presentEmployee(member as unknown as Parameters<typeof presentEmployee>[0]);
       }),
       memberMeta: {
         total: Number((members.rows[0] as { total_count?: number } | undefined)?.total_count ?? 0),
@@ -1181,6 +1357,78 @@ function registerRuleRoutes(app: FastifyInstance, pool: DbPool, clock: () => Dat
 
   app.get('/rules', async (request) => {
     const companyId = companyIdFrom(request);
+    const query = z.object({
+      search: z.string().max(300).optional(),
+      categoryId: uuidSchema.optional(),
+      dependency: z.string().max(300).optional(),
+      status: z.enum(['PUBLISHED', 'DRAFT', 'DISABLED']).optional(),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
+    }).parse(request.query);
+    const parameters = [
+      companyId,
+      query.search?.trim() || null,
+      query.categoryId ?? null,
+      query.dependency?.trim() || null,
+      query.status ?? null,
+    ];
+    const where = `r.company_id = $1
+      AND ($2::text IS NULL OR r.key ILIKE '%' || $2 || '%'
+        OR p.key ILIKE '%' || $2 || '%' OR pv.name ILIKE '%' || $2 || '%'
+        OR pc.name ILIKE '%' || $2 || '%' OR rv.condition::text ILIKE '%' || $2 || '%')
+      AND ($3::uuid IS NULL OR pc.id = $3)
+      AND ($4::text IS NULL OR EXISTS (
+        SELECT 1 FROM rule_dependencies filter_dependencies
+         WHERE filter_dependencies.company_id = rv.company_id
+           AND filter_dependencies.rule_version_id = rv.id
+           AND (filter_dependencies.dependency_type || ':' || filter_dependencies.dependency_key) ILIKE '%' || $4 || '%'))
+      AND ($5::text IS NULL OR ($5 = 'DISABLED' AND NOT rv.enabled)
+        OR ($5 <> 'DISABLED' AND rv.status = $5 AND rv.enabled))`;
+    const [result, totalResult, dependencies] = await Promise.all([pool.query(
+      `SELECT r.id, r.key, rv.id AS version_id, rv.version, rv.status, rv.policy_id,
+              p.key AS policy_key, pv.name AS policy_name, pc.id AS category_id,
+              pc.name AS category_name, pc.cardinality,
+              rv.priority, rv.enabled, rv.valid_from, rv.valid_to,
+              rv.condition, rv.specificity, rv.content_hash, rv.published_at,
+              (SELECT count(DISTINCT ma.employee_id)::int FROM materialized_assignments ma
+                WHERE ma.company_id = r.company_id AND ma.policy_id = rv.policy_id) AS assigned_employee_count
+         FROM rules r
+         JOIN rule_versions rv ON rv.company_id = r.company_id AND rv.id = r.current_version_id
+         JOIN policies p ON p.company_id = rv.company_id AND p.id = rv.policy_id
+         JOIN policy_categories pc ON pc.company_id = p.company_id AND pc.id = p.category_id
+         JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
+        WHERE ${where}
+        ORDER BY r.key, r.id
+        LIMIT $6 OFFSET $7`,
+      [...parameters, query.limit, query.offset],
+    ), pool.query<{ total: number }>(
+      `SELECT count(*)::int AS total
+         FROM rules r
+         JOIN rule_versions rv ON rv.company_id = r.company_id AND rv.id = r.current_version_id
+         JOIN policies p ON p.company_id = rv.company_id AND p.id = rv.policy_id
+         JOIN policy_categories pc ON pc.company_id = p.company_id AND pc.id = p.category_id
+         JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
+        WHERE ${where}`,
+      parameters,
+    ), pool.query<{ dependency: string }>(
+      `SELECT DISTINCT rd.dependency_type || ':' || rd.dependency_key AS dependency
+         FROM rule_dependencies rd
+         JOIN rule_versions rv ON rv.company_id = rd.company_id AND rv.id = rd.rule_version_id
+         JOIN rules r ON r.company_id = rv.company_id AND r.current_version_id = rv.id
+        WHERE rd.company_id = $1
+        ORDER BY dependency`,
+      [companyId],
+    )]);
+    return {
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+      facets: { dependencies: dependencies.rows.map((row) => row.dependency) },
+    };
+  });
+
+  app.get('/rules/:id', async (request) => {
+    const companyId = companyIdFrom(request);
+    const ruleId = idParam(request);
     const result = await pool.query(
       `SELECT r.id, r.key, rv.id AS version_id, rv.version, rv.status, rv.policy_id,
               p.key AS policy_key, pv.name AS policy_name, pc.id AS category_id,
@@ -1194,10 +1442,11 @@ function registerRuleRoutes(app: FastifyInstance, pool: DbPool, clock: () => Dat
          JOIN policies p ON p.company_id = rv.company_id AND p.id = rv.policy_id
          JOIN policy_categories pc ON pc.company_id = p.company_id AND pc.id = p.category_id
          JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
-        WHERE r.company_id = $1
-        ORDER BY r.key, rv.version DESC`,
-      [companyId],
+        WHERE r.company_id = $1 AND r.id = $2
+        ORDER BY rv.version DESC`,
+      [companyId, ruleId],
     );
+    if (result.rows.length === 0) throw notFound('Rule');
     return { data: result.rows };
   });
 
@@ -1390,7 +1639,12 @@ function registerOverrideRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
     const companyId = companyIdFrom(request);
     const query = z.object({ employeeId: uuidSchema.optional() }).parse(request.query);
     const result = await pool.query(
-      `SELECT mo.id, mo.employee_id, ev.display_name AS employee_name,
+      `SELECT mo.id, mo.employee_id, e.external_id AS employee_external_id,
+              ev.display_name AS employee_display_name,
+              ev.department AS employee_department,
+              ev.location AS employee_location,
+              ev.attributes AS employee_attributes,
+              imported.employee_id IS NOT NULL AS employee_is_imported,
               mo.policy_id, p.key AS policy_key, pv.name AS policy_name,
               pc.id AS category_id, pc.name AS category_name,
               mo.action, mo.priority, mo.reason, mo.valid_from, mo.valid_to, mo.revoked_at,
@@ -1398,6 +1652,8 @@ function registerOverrideRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
          FROM manual_overrides mo
          JOIN employees e ON e.company_id = mo.company_id AND e.id = mo.employee_id
          JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.id = e.current_version_id
+         LEFT JOIN employee_import_records imported
+           ON imported.company_id = e.company_id AND imported.employee_id = e.id
          JOIN policies p ON p.company_id = mo.company_id AND p.id = mo.policy_id
          JOIN policy_categories pc ON pc.company_id = p.company_id AND pc.id = p.category_id
          JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.policy_id = p.id
@@ -1406,7 +1662,7 @@ function registerOverrideRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
         ORDER BY mo.created_at DESC, mo.id DESC`,
       [companyId, query.employeeId ?? null],
     );
-    return { data: result.rows };
+    return { data: result.rows.map((row) => presentEmployeeReference(row as Record<string, unknown>)) };
   });
 
   app.delete('/manual-overrides/:id', async (request, reply) => {

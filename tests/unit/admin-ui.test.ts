@@ -44,9 +44,15 @@ describe('production admin application', () => {
 
     expect(script).toContain('real NYC Open Data employee facts');
     expect(script).toContain('Evaluation / demonstration policy configuration');
+    expect(script).toContain('employee?.display_label');
+    expect(script).toContain('Search record ID, job title, agency, or location');
+    expect(script).toContain('No person name is stored or generated');
+    expect(script).not.toContain('NYC record');
     expect(script).toContain("facet('status', result.facets.employment_statuses");
     expect(api).toContain('WITH page AS MATERIALIZED');
     expect(api).toContain('policy_counts AS');
     expect(api).toContain("ev.attributes ->> 'employment_status'");
+    expect(api).toContain("ev.attributes ->> 'job_title'");
+    expect(api).toContain('presentEmployee');
   });
 });

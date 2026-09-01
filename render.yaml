@@ -3,7 +3,7 @@ services:
     name: policy-assignment-engine-web
     runtime: node
     buildCommand: npm ci && npm run build
-    preDeployCommand: npm run db:migrate:start && npm run seed:reviewer:start
+    preDeployCommand: npm run db:migrate:start && npm run seed:product:start
     startCommand: npm start
     healthCheckPath: /health
     envVars:

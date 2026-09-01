@@ -2,7 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import type { InjectOptions } from 'light-my-request';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../../src/api/app.js';
-import { createPool, type DbPool } from '../../src/db.js';
+import { createPool, inTransaction, type DbPool } from '../../src/db.js';
+import {
+  CERTIFIED_RULE_COUNT,
+  certifiedBaselineSemantics,
+  createCertifiedBaseline,
+} from '../../src/baseline/certified-universe.js';
 import { ReconciliationService } from '../../src/services/reconciliation.js';
 import { ReconciliationWorker } from '../../src/services/worker.js';
 import { compareRegressionCheckpoint } from '../../src/eval/regression.js';
@@ -104,6 +109,19 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     expect(employeeList.facets.locations).toContain('CA');
     expect(employeeList.facets.employment_statuses).toContain('ACTIVE');
     expect(employeeList.data[0].policy_count).toBe(1);
+    expect(employeeList.data[0]).toMatchObject({
+      display_label: 'Integration Employee',
+      context_label: 'Engineering · CA',
+      record_label: 'Employee ID E-100',
+      is_anonymized: false,
+    });
+    const ruleList = await request(
+      'GET',
+      `/rules?search=enhanced&categoryId=${category.id}&dependency=FIELD%3Alocation&status=PUBLISHED&limit=1&offset=0`,
+    );
+    expect(ruleList.meta).toMatchObject({ total: 1, limit: 1, offset: 0 });
+    expect(ruleList.data[0]).toMatchObject({ id: enhancedRule.id, key: 'enhanced-ca' });
+    expect(ruleList.facets.dependencies).toContain('FIELD:location');
     const overview = await request('GET', '/overview');
     expect(overview).toMatchObject({ employees: 1, active_policies: 2, active_rules: 2, assignments: 1 });
     expect(overview.activity.length).toBeGreaterThan(0);
@@ -197,6 +215,159 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     await drainJobs();
     expect((await request('GET', `/employees/${employee.id}/assignments`)).data.some((item: { policy_key: string }) => item.policy_key === 'github')).toBe(true);
   });
+
+  it('keeps employee, rule, group, and manual-override previews equal to reconciled assignments', async () => {
+    now = new Date('2026-08-10T12:00:00Z');
+    const category = await request('POST', '/policy-categories', {
+      key: 'preview-parity', name: 'Preview parity', cardinality: 'SINGLE',
+    });
+    const standard = await request('POST', '/policies', {
+      key: 'preview-standard', categoryId: category.id, name: 'Preview standard', effectiveFrom: '2026-08-10',
+    });
+    const locationPolicy = await request('POST', '/policies', {
+      key: 'preview-location', categoryId: category.id, name: 'Preview location', effectiveFrom: '2026-08-10',
+    });
+    const groupPolicy = await request('POST', '/policies', {
+      key: 'preview-group', categoryId: category.id, name: 'Preview group', effectiveFrom: '2026-08-10',
+    });
+    const employee = await request('POST', '/employees', {
+      externalId: 'E-PREVIEW-PARITY', displayName: 'Preview Parity Employee', location: 'A', effectiveFrom: '2026-08-10',
+    });
+    await request('POST', '/rules', {
+      key: 'preview-default-rule', policyId: standard.id, priority: 1, validFrom: '2026-08-10', publish: true,
+      condition: { type: 'comparison', fact: { kind: 'as_of_date' }, operator: 'GTE', value: '2000-01-01' },
+    });
+    const locationRule = await request('POST', '/rules', {
+      key: 'preview-location-rule', policyId: locationPolicy.id, priority: 10, validFrom: '2026-08-10', publish: true,
+      condition: { type: 'comparison', fact: { kind: 'employee', field: 'location' }, operator: 'EQ', value: 'B' },
+    });
+    const group = await request('POST', '/groups', { key: 'preview-parity-group', name: 'Preview parity group' });
+    await request('POST', '/rules', {
+      key: 'preview-group-rule', policyId: groupPolicy.id, priority: 20, validFrom: '2026-08-10', publish: true,
+      condition: { type: 'group', groupId: group.id, operator: 'MEMBER_OF' },
+    });
+    await drainJobs();
+
+    now = new Date('2026-08-11T12:00:00Z');
+    const employeePreview = await request('POST', '/employees/preview', {
+      employeeId: employee.id, location: 'B', groupIds: [], asOfDate: '2026-08-11',
+    });
+    await request('PATCH', `/employees/${employee.id}`, { location: 'B', groupIds: [], effectiveFrom: '2026-08-11' });
+    await drainJobs();
+    expect(await assignmentPolicyIds(employee.id, category.id)).toEqual(previewPolicyIds(employeePreview, category.id));
+
+    now = new Date('2026-08-12T12:00:00Z');
+    const rulePreview = await request('POST', '/rules/preview', {
+      ruleId: locationRule.id,
+      policyId: locationPolicy.id,
+      priority: 10,
+      enabled: true,
+      validFrom: '2026-08-12',
+      asOfDate: '2026-08-12',
+      condition: { type: 'comparison', fact: { kind: 'employee', field: 'location' }, operator: 'EQ', value: 'C' },
+    });
+    const expectedRulePolicies = rulePreview.examples.find((example: { employeeId: string }) => example.employeeId === employee.id)?.afterPolicyIds;
+    await request('POST', `/rules/${locationRule.id}/versions`, {
+      policyId: locationPolicy.id,
+      priority: 10,
+      enabled: true,
+      validFrom: '2026-08-12',
+      publish: true,
+      condition: { type: 'comparison', fact: { kind: 'employee', field: 'location' }, operator: 'EQ', value: 'C' },
+    });
+    await drainJobs();
+    expect(await assignmentPolicyIds(employee.id, category.id)).toEqual(expectedRulePolicies);
+
+    now = new Date('2026-08-13T12:00:00Z');
+    const groupPreview = await request('POST', '/employees/preview', {
+      employeeId: employee.id, groupIds: [group.id], asOfDate: '2026-08-13',
+    });
+    await request('PATCH', `/employees/${employee.id}`, { groupIds: [group.id], effectiveFrom: '2026-08-13' });
+    await drainJobs();
+    expect(await assignmentPolicyIds(employee.id, category.id)).toEqual(previewPolicyIds(groupPreview, category.id));
+
+    now = new Date('2026-08-14T12:00:00Z');
+    const overrideInput = {
+      employeeId: employee.id,
+      policyId: standard.id,
+      action: 'ASSIGN',
+      priority: -100,
+      reason: 'Preview parity exception',
+      validFrom: '2026-08-14',
+    };
+    const overridePreview = await request('POST', '/manual-overrides/preview', { ...overrideInput, asOfDate: '2026-08-14' });
+    await request('POST', '/manual-overrides', overrideInput);
+    await drainJobs();
+    expect(await assignmentPolicyIds(employee.id, category.id)).toEqual(previewPolicyIds(overridePreview, category.id));
+
+    now = new Date('2026-08-15T12:00:00Z');
+    const newEmployeeInput = {
+      externalId: 'E-PREVIEW-CREATE',
+      displayName: 'Preview Create Employee',
+      location: 'C',
+      groupIds: [],
+    };
+    const createPreview = await request('POST', '/employees/preview', {
+      ...newEmployeeInput,
+      asOfDate: '2026-08-15',
+    });
+    const created = await request('POST', '/employees', { ...newEmployeeInput, effectiveFrom: '2026-08-15' });
+    await drainJobs();
+    expect(await assignmentPolicyIds(created.id, category.id)).toEqual(previewPolicyIds(createPreview, category.id));
+  });
+
+  it('instantiates the one certified baseline twice with identical normalized semantics', async () => {
+    const tenantIds: string[] = [];
+    try {
+      for (const namespace of ['parity-a', 'parity-b']) {
+        const company = await pool.query<{ id: string }>(
+          'INSERT INTO companies (name) VALUES ($1) RETURNING id', [`Certified baseline ${namespace} ${crypto.randomUUID()}`],
+        );
+        const tenantId = company.rows[0]!.id;
+        tenantIds.push(tenantId);
+        for (let index = 0; index < 10; index += 1) {
+          const employee = await pool.query<{ id: string }>(
+            'INSERT INTO employees (company_id, external_id) VALUES ($1, $2) RETURNING id',
+            [tenantId, `BASELINE-${index}`],
+          );
+          const version = await pool.query<{ id: string }>(
+            `INSERT INTO employee_versions
+               (company_id, employee_id, version, valid_from, display_name, location, department,
+                employment_type, is_manager, hire_date, attributes, changed_fields)
+             VALUES ($1, $2, 1, '2026-06-30', $3, $4, $5, $6, false, $7::date, $8::jsonb, ARRAY['created'])
+             RETURNING id`,
+            [
+              tenantId,
+              employee.rows[0]!.id,
+              `Record ${index}`,
+              `Location ${index % 3}`,
+              `Department ${index}`,
+              `Type ${index % 2}`,
+              `202${index % 5}-01-01`,
+              JSON.stringify({ job_title: `Title ${index}`, employment_status: index % 2 === 0 ? 'ACTIVE' : 'LEAVE' }),
+            ],
+          );
+          await pool.query('UPDATE employees SET current_version_id = $3 WHERE company_id = $1 AND id = $2', [
+            tenantId, employee.rows[0]!.id, version.rows[0]!.id,
+          ]);
+        }
+        await inTransaction(pool, (client) => createCertifiedBaseline(client, {
+          companyId: tenantId,
+          baselineDate: '2026-06-30',
+          idNamespace: namespace,
+          createdBy: 'semantic-parity-test',
+          ruleCount: CERTIFIED_RULE_COUNT,
+        }));
+      }
+      const [left, right] = await Promise.all(tenantIds.map((tenantId) => certifiedBaselineSemantics(pool, tenantId)));
+      expect(left!.counts).toEqual({ categories: 6, policies: 48, rules: 300, groups: 8 });
+      expect(right!.counts).toEqual(left!.counts);
+      expect(right!.fingerprint).toBe(left!.fingerprint);
+      expect(right!.content).toEqual(left!.content);
+    } finally {
+      if (tenantIds.length > 0) await pool.query('DELETE FROM companies WHERE id = ANY($1::uuid[])', [tenantIds]);
+    }
+  }, 120_000);
 
   it('fires a persisted tenure transition when no source record changes', async () => {
     now = new Date('2026-08-02T12:00:00Z');
@@ -309,6 +480,20 @@ async function drainJobs(): Promise<void> {
     [companyId],
   );
   expect(failed.rows).toEqual([]);
+}
+
+function previewPolicyIds(preview: any, categoryId: string): string[] {
+  return (preview.categories.find((category: { id: string }) => category.id === categoryId)?.after ?? [])
+    .map((policy: { id: string }) => policy.id)
+    .sort();
+}
+
+async function assignmentPolicyIds(employeeId: string, categoryId: string): Promise<string[]> {
+  const assignments = await request('GET', `/employees/${employeeId}/assignments`);
+  return assignments.data
+    .filter((assignment: { category_id: string }) => assignment.category_id === categoryId)
+    .map((assignment: { policy_id: string }) => assignment.policy_id)
+    .sort();
 }
 
 async function request(method: NonNullable<InjectOptions['method']>, url: string, body?: object, tenant = true): Promise<any> {

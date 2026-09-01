@@ -64,11 +64,11 @@ Manual overrides are visually exceptional, always require a reason, state that t
 
 The engine's differentiator is not CRUD volume; it is trustworthy consequences. The interface keeps employee facts, rule intent, conflict semantics, materialized state, and audit evidence connected without making job machinery a primary concept. A reviewer can understand what a policy is, who receives it, why it won, what an edit will change, and how to reconstruct a historical decision without reading the architecture document or inspecting raw records.
 
-## Reviewer workspace and journey
+## Product workspace and journey
 
-`npm run seed:reviewer` creates **NYC Open Data Policy Workspace** from the 50,000 normalized source facts already persisted by the NYC importer. It never calls the NYC API. The copy has reviewer-owned employee identities, versions, import provenance, assignments, and jobs, while the source evaluation tenant and certified results remain isolated. The imported names are privacy-preserving opaque record labels because the importer deliberately discards source names.
+`npm run seed:product` creates **NYC Open Data Policy Workspace** from the 50,000 normalized source facts already persisted by the NYC importer. It never calls the NYC API. The copy has product-owned employee identities, versions, import provenance, assignments, and jobs, while the source evaluation tenant and certified results remain isolated. Imported identities remain anonymized and are presented through job title, agency/location context, and a stable record label.
 
-The policies, groups, and rules are visibly labelled **Evaluation / demonstration policy configuration**. They are intentionally small and explainable, and the product never implies that NYC created or uses them.
+The policies, groups, and rules are visibly labelled **Evaluation / demonstration policy configuration** because they are not official NYC policies. They are the exact 6-category, 48-policy, 300-rule starting configuration used by the certified evaluation; the product does not substitute a smaller rule universe.
 
 The intended walkthrough is:
 
@@ -77,7 +77,7 @@ Policies → understand assignable outcomes and category behavior
 Rules → inspect English-like conditions and preview impact
 Employees → open an imported NYC record and inspect current policies
 Why → inspect matching facts, competitors, and precedence
-Edit employee → preview a fact or manager-status change before saving a new reviewer-only version
+Edit employee → preview a fact or membership change before saving a new product-tenant version
 Add employee → preview resolved policies before creation
 Audit → see the employee and assignment changes, with technical work collapsed
 ```

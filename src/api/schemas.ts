@@ -24,7 +24,10 @@ export const employeeCreateInputSchema = employeeInputSchema.extend({
 export const employeeUpdateSchema = employeeInputSchema
   .omit({ externalId: true })
   .partial()
-  .extend({ effectiveFrom: isoDateSchema.optional() })
+  .extend({
+    effectiveFrom: isoDateSchema.optional(),
+    groupIds: z.array(uuidSchema).max(1_000).optional(),
+  })
   .refine((value) => Object.keys(value).some((key) => key !== 'effectiveFrom'), 'At least one employee field is required');
 
 export const employeePreviewInputSchema = employeeInputSchema

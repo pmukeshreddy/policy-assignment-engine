@@ -45,9 +45,9 @@ docker compose up --build
 
 Open <http://localhost:3000/admin/>. **NYC Open Data Policy Workspace** is the default; the API health endpoint is <http://localhost:3000/health>.
 
-The focused reviewer journey is: Policies (what can be assigned) → Rules (who receives them) → Employees (which facts matched) → Why (how the winner was selected) → edit impact (what changes before saving) → Audit (what happened and why). Categories live inside Policies, manual overrides live on Employee detail, and technical reconciliation records are available only inside Audit's advanced disclosure. Employee and rule previews call backend services that use the production evaluator/resolver—there is no browser-side rule engine.
+The focused product journey is: Policies (what can be assigned) → Rules (who receives them) → Employees (which facts matched) → Why (how the winner was selected) → edit impact (what changes before saving) → Audit (what happened and why). Categories live inside Policies and manual overrides live on Employee detail. Employee and rule previews call backend services that use the production evaluator/resolver—there is no browser-side rule engine.
 
-PostgreSQL data persists in the `policy-postgres` volume. Compose runs migrations and the idempotent reviewer seed before the API and background worker start. Seeding copies persisted `employee_import_records` set-wise into the reviewer tenant and does not perform a network request.
+PostgreSQL data persists in the `policy-postgres` volume. Compose runs migrations and the idempotent product seed before the API and background worker start. Seeding copies persisted `employee_import_records` set-wise into an isolated editable tenant and does not perform a network request.
 
 ## Local development
 
@@ -59,7 +59,7 @@ npm ci
 cp .env.example .env
 npm run db:migrate
 npm run data:nyc       # once, only when PostgreSQL does not already contain the import
-npm run seed:reviewer  # offline copy from persisted import facts
+npm run seed:product   # offline product tenant from persisted import facts + the certified baseline
 npm run dev
 ```
 
@@ -148,7 +148,7 @@ npm run eval:regression -- --seed=482901 --reuse-prepared              # resume 
 
 `--reuse-prepared` is guarded: it only requeues the baseline FULL job when the imported source universe still has version 1 facts, zero manual controls, the expected 300 rules, and no unrelated active jobs. Once mutations have begun, a deterministic rebuild is required. Evaluation tenants are excluded from unscoped production workers; the runner's company-scoped worker is the only process that claims their jobs.
 
-Evaluation tenants are excluded from `GET /companies`. `npm run seed:reviewer` creates a separate normal reviewer tenant from the immutable `employee_import_records.normalized_facts` baseline, copies provenance into a reviewer-owned import record, and drains one full reconciliation job. It accepts an already-complete reviewer workspace and fails explicitly rather than overwriting reviewer edits. Normal employee edits create new versions only in the reviewer tenant.
+Evaluation tenants are excluded from `GET /companies`. `npm run seed:product` creates a separate editable product tenant from the immutable `employee_import_records.normalized_facts` baseline, copies provenance into a product-owned import record, and invokes the same `createCertifiedBaseline()` implementation used by evaluation setup. It then drains one full reconciliation job. Existing product edits are never overwritten. Normal employee edits create new versions only in the product tenant.
 
 ## Rule representation
 
@@ -226,7 +226,7 @@ To deploy:
 
 1. Push this repository to GitHub.
 2. In Render, choose **New → Blueprint** and select the repository.
-3. Ensure the private PostgreSQL database already contains the NYC import, then review the three resources from `render.yaml` and apply the Blueprint. The web pre-deploy command runs migrations and seeds the isolated reviewer workspace without fetching NYC.
+3. Ensure the private PostgreSQL database already contains the NYC import, then review the three resources from `render.yaml` and apply the Blueprint. The web pre-deploy command runs migrations and seeds the isolated product workspace without fetching NYC.
 4. Wait for both `policy-assignment-engine-web` and `policy-assignment-engine-worker` to become live.
 5. Open `https://YOUR-WEB-SERVICE.onrender.com/admin/`, select **NYC Open Data Policy Workspace**, and verify `/health` returns `{ "status": "ok" }`.
 

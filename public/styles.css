@@ -238,6 +238,9 @@ tbody tr[data-open]:hover td { background: #f7f9f7; }
 .cell-stack { min-width: 0; display: grid; gap: 1px; }
 .cell-stack strong { overflow: hidden; color: var(--ink); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .cell-stack small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.employee-identity { min-width: 250px; }
+.employee-identity .cell-stack { gap: 2px; }
+.record-label { display: block; color: var(--faint); font: 8.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .055em; text-transform: uppercase; }
 .numeric { font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
@@ -301,6 +304,16 @@ dialog::backdrop { background: rgb(22 31 26 / 44%); backdrop-filter: blur(2px); 
 .identity-header .avatar { width: 42px; height: 42px; font-size: 13px; }
 .identity-header h2 { margin: 0; font-size: 17px; }
 .identity-header p { margin: 2px 0 0; color: var(--muted); font-size: 11px; }
+.identity-header .record-label { margin-top: 3px; }
+.anonymized-note { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; margin: 0 18px 18px; padding: 12px; border: 1px solid var(--accent-line); border-radius: var(--radius); color: var(--ink-secondary); background: var(--accent-soft); }
+.form-section .anonymized-note { margin: 14px 0 0; }
+.anonymized-note > svg { width: 16px; height: 16px; margin: 2px auto 0; color: var(--accent); }
+.anonymized-note strong { display: block; font-size: 11px; }
+.anonymized-note p { margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.record-identity-card { display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: #fafbfa; }
+.record-identity-card .avatar { width: 42px; height: 42px; font-size: 13px; }
+.record-identity-card strong { display: block; font-size: 14px; }
+.record-identity-card p { margin: 3px 0; color: var(--muted); font-size: 10.5px; }
 .header-button-row { display: flex; gap: 7px; margin-left: auto; }
 .tab-list { position: sticky; z-index: 1; top: 63px; display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--line); background: white; overflow: auto; }
 .tab-button { min-height: 40px; padding: 0 9px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -450,6 +463,7 @@ dialog::backdrop { background: rgb(22 31 26 / 44%); backdrop-filter: blur(2px); 
 .preview-examples { display: grid; gap: 7px; margin-top: 12px; }
 .preview-example { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: white; }
 .preview-example strong { display: block; font-size: 10.5px; }
+.preview-example small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }
 .preview-example span { color: var(--muted); font-size: 9.5px; }
 
 .explanation-hero { padding: 18px; border-bottom: 1px solid var(--line); }
@@ -514,6 +528,7 @@ dialog::backdrop { background: rgb(22 31 26 / 44%); backdrop-filter: blur(2px); 
 .audit-event time { color: var(--faint); font-size: 9.5px; }
 .audit-event h3 { margin: 2px 0 1px; font-size: 11.5px; }
 .audit-event p { margin: 0; color: var(--muted); font-size: 10.5px; }
+.audit-event .record-label { margin-top: 3px; }
 .technical-audit { margin-top: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .technical-audit > summary { padding: 12px 14px; cursor: pointer; color: var(--muted); font-size: 10.5px; font-weight: 650; }
 .technical-audit > p { margin: 0; padding: 0 14px 12px; color: var(--muted); font-size: 10px; }
