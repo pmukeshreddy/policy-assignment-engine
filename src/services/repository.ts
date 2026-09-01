@@ -254,6 +254,7 @@ export async function loadOverridesForCategory(
       WHERE mo.company_id = $1
         AND mo.employee_id = $2
         AND p.category_id = $3
+        AND mo.revoked_at IS NULL
         AND (mo.valid_to IS NULL OR mo.valid_to > $4::date)
       ORDER BY mo.id`,
     [companyId, employeeId, categoryId, asOfDate],

@@ -17,11 +17,32 @@ export const employeeInputSchema = z.object({
   effectiveFrom: isoDateSchema.optional(),
 });
 
+export const employeeCreateInputSchema = employeeInputSchema.extend({
+  groupIds: z.array(uuidSchema).max(1_000).optional(),
+});
+
 export const employeeUpdateSchema = employeeInputSchema
   .omit({ externalId: true })
   .partial()
   .extend({ effectiveFrom: isoDateSchema.optional() })
   .refine((value) => Object.keys(value).some((key) => key !== 'effectiveFrom'), 'At least one employee field is required');
+
+export const employeePreviewInputSchema = employeeInputSchema
+  .omit({ effectiveFrom: true })
+  .partial()
+  .extend({
+    employeeId: uuidSchema.optional(),
+    groupIds: z.array(uuidSchema).max(1_000).optional(),
+    asOfDate: isoDateSchema.optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.employeeId === undefined && (value.externalId === undefined || value.displayName === undefined)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'New employee previews require externalId and displayName',
+      });
+    }
+  });
 
 export const groupInputSchema = z.object({
   key: entityKeySchema,

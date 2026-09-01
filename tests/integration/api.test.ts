@@ -74,7 +74,38 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     const why = await request('GET', `/employees/${employee.id}/assignments/${initialAssignmentId}/explanation`);
     expect(why.decision.winningCandidate.ruleVersionId).toBe(enhancedRule.versionId);
     expect(why.decision.competingCandidates[0].reason).toMatch(/higher priority/);
+    expect(why.decision.competingCandidates[0].candidate.policyName).toBe('Standard PTO');
     expect(why.employeeSnapshot.location).toBe('CA');
+
+    const employeeChangePreview = await request('POST', '/employees/preview', {
+      employeeId: employee.id,
+      displayName: 'Integration Employee',
+      location: 'NY',
+      department: 'Engineering',
+      employmentType: 'full_time',
+      hireDate: '2024-01-01',
+      attributes: { country: 'US' },
+      groupIds: [],
+      asOfDate: '2026-08-01',
+    });
+    expect(employeeChangePreview.summary).toMatchObject({
+      categoriesChanged: 1,
+      assignmentsAdded: 1,
+      assignmentsRemoved: 1,
+      assignmentsReplaced: 1,
+    });
+    expect(employeeChangePreview.categories.find((item: { key: string }) => item.key === 'pto')).toMatchObject({
+      before: [{ name: 'Enhanced PTO' }],
+      after: [{ name: 'Standard PTO' }],
+    });
+
+    const employeeList = await request('GET', '/employees?search=Integration&location=CA&limit=10');
+    expect(employeeList.meta).toMatchObject({ total: 1, limit: 10, offset: 0 });
+    expect(employeeList.facets.locations).toContain('CA');
+    expect(employeeList.data[0].policy_count).toBe(1);
+    const overview = await request('GET', '/overview');
+    expect(overview).toMatchObject({ employees: 1, active_policies: 2, active_rules: 2, assignments: 1 });
+    expect(overview.activity.length).toBeGreaterThan(0);
 
     const preview = await request('POST', '/rules/preview', {
       ruleId: enhancedRule.id,

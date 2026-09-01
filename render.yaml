@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: policy-assignment-engine-web
+    runtime: node
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run db:migrate:start
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: policy-assignment-engine-db
+          property: connectionString
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: PREVIEW_MAX_EMPLOYEES
+        value: "100000"
+
+  - type: worker
+    name: policy-assignment-engine-worker
+    runtime: node
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run db:migrate:start
+    startCommand: npm run worker:start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: policy-assignment-engine-db
+          property: connectionString
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: WORKER_POLL_MS
+        value: "500"
+      - key: WORKER_CONCURRENCY
+        value: "4"
+      - key: JOB_MAX_ATTEMPTS
+        value: "8"
+      - key: JOB_LEASE_SECONDS
+        value: "60"
+
+databases:
+  - name: policy-assignment-engine-db
+    databaseName: policy_engine
+    user: policy_engine
+    ipAllowList: []

@@ -20,11 +20,11 @@ The repository ships with no company, employee, group, policy, membership, rule,
 - Serialized, idempotent assignment diffing and materialized current reads
 - Effective-dated assignment history and first-class explanation records
 - Exact rule preview through the production evaluator/resolver
-- Tenant-scoped API and a small admin console at `/admin/`
+- Tenant-scoped API and a production admin application at `/admin/`
 - Unit, PostgreSQL integration, concurrency, temporal, API, and randomized oracle tests
 - Reproducible 50,000-employee NYC Open Data regression evaluation with 300 evaluation-only rules and 100,000 mutations
 
-See [Architecture](docs/ARCHITECTURE.md) and the [API guide](docs/API.md).
+See [Architecture](docs/ARCHITECTURE.md), the [API guide](docs/API.md), and the [UX design rationale](docs/UX_DESIGN.md).
 
 ## Quick start with Docker
 
@@ -36,6 +36,8 @@ docker compose up --build
 ```
 
 Open <http://localhost:3000/admin/> and create the first company. The database starts empty by design. The API health endpoint is <http://localhost:3000/health>.
+
+The admin application includes an operational overview; server-filtered employee table and detail drawer; human-readable assignment explanations; employee onboarding and edit-impact preview; recursive rule builder and rule preview; category, policy, group, and override management; reconciliation health; audit activity; responsive navigation; and a `Cmd/Ctrl+K` command menu. Employee and rule previews call backend services that use the production evaluator/resolver—there is no browser-side rule engine.
 
 PostgreSQL data persists in the `policy-postgres` volume. The `migrate` container must finish successfully before the API and worker start.
 
@@ -200,9 +202,23 @@ The PostgreSQL suite covers exact preview, manual precedence, rejected-candidate
 Latest verified command:
 
 ```text
-Test Files  9 passed (9)
-Tests       30 passed (30)
+Test Files  10 passed (10)
+Tests       32 passed (32)
 ```
+
+## Render deployment
+
+[`render.yaml`](render.yaml) defines one Fastify web service (API plus static admin application), one background reconciliation worker, and one private Render PostgreSQL database. Both Node processes build from the same commit and use the same strongly typed production modules. The web service exposes `/health`; migrations run as an advisory-lock-protected pre-deploy command before each service starts.
+
+To deploy:
+
+1. Push this repository to GitHub.
+2. In Render, choose **New → Blueprint** and select the repository.
+3. Review the three resources from `render.yaml` and apply the Blueprint.
+4. Wait for both `policy-assignment-engine-web` and `policy-assignment-engine-worker` to become live.
+5. Open `https://YOUR-WEB-SERVICE.onrender.com/admin/`, create the first workspace, and verify `/health` returns `{ "status": "ok" }`.
+
+`DATABASE_URL` is wired from the private database by the Blueprint. Render supplies `PORT`; the application binds `HOST=0.0.0.0`. No NYC token or imported evaluation population is required for the reviewer product flow. For a production organization, place the service behind an authenticated admin gateway that authorizes the company context; `X-Company-Id` is tenant isolation, not authentication.
 
 ## Operational notes
 

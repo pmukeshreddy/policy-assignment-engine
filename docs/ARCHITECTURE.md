@@ -169,6 +169,7 @@ Important access paths include:
 - materialized reads by `(company, employee, category)`;
 - foreign-key support indexes from materialized assignments to decisions and from decisions to employee versions, preventing retention/reset cascades from degrading into repeated scans;
 - explanation decisions by `(company, employee, category, as_of_date DESC)`;
+- operational decisions by `(company, decided_at DESC)`, tenant job status, and tenant active-override dates;
 - partial job claim and due-schedule indexes.
 
 Selectors compare JSONB values with parameters, and dynamic employee-column selection is restricted to a hardcoded safe map.
@@ -199,6 +200,26 @@ Measured reconciliation-job latency was 46.199 ms p50, 582.728 ms p95, and 733.5
 
 Concurrency was selected from a measured local calibration: 8 workers processed 643.343 scopes/second, 12 processed 950.057, and 16 processed 858.103, so the certified run used 12. Reconciliation latency excludes deterministic setup/reset/import, baseline materialization, worker calibration, and oracle time. No NYC API request occurs during regression execution.
 
+## Admin product surface
+
+Fastify serves the dependency-light admin application from `/admin/`; it uses the same JSON API as external consumers. The persistent shell maps the domain into People, Policies, and Operations rather than exposing tables or job internals. Employee and rule change previews call backend preview services, explanations read immutable decision evidence, and writes flow through the same effective-dated source APIs and transactional jobs as any other client.
+
+Employee list filtering/pagination is server-side for large tenants. Detail drawers preserve list context, while native dialogs provide focus trapping for onboarding, impact review, structured rule editing, and exceptional manual controls. The recursive builder expresses the validated AND/OR/NOT/comparison/group AST without arbitrary code. Responsive tables retain every important value as labelled rows. See [UX design](UX_DESIGN.md) for research references and interaction rationale.
+
+## Render topology
+
+The Blueprint keeps the modular-monolith boundary intact:
+
+```mermaid
+flowchart LR
+  Browser[Admin browser] --> Web[Render Web Service\nFastify + static frontend]
+  Web --> DB[(Render PostgreSQL)]
+  Worker[Render Background Worker\nreconciliation + schedules] --> DB
+  Web -->|transactional jobs| DB
+```
+
+Both services build the same TypeScript commit. Advisory-lock-protected migrations run as pre-deploy commands, the web service exposes the database-backed `/health` check, and the worker uses bounded concurrency plus PostgreSQL job claiming. PostgreSQL remains the only authoritative state and queue.
+
 ## 18. Known tradeoffs
 
 - Effective time is calendar-date, not intra-day. Decision records preserve multiple evaluations, but assignment “as of” semantics return the final state for a day.
@@ -206,5 +227,5 @@ Concurrency was selected from a measured local calibration: 8 workers processed 
 - Exact preview intentionally refuses populations over its configured bound; it does not sample or estimate.
 - Rule impact without a logically mandatory selector scans the company's employees. This is required for correctness with `OR`, `NOT`, and pure time rules.
 - Rule-impact employee IDs are currently held in memory for one job. Very large tenants should page them into child jobs.
-- The admin UI is deliberately compact and its visual builder creates one comparison at a time. The API accepts the complete nested AST.
+- The dependency-light admin UI avoids a client framework and build pipeline. Its recursive builder supports the complete nested AST, but does not include drag-and-drop condition rearrangement.
 - Authentication is outside this submission's scope. Deploy behind an authenticated admin gateway that supplies an authorized company ID; the header alone is not proof of identity.

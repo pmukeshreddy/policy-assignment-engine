@@ -3,56 +3,65 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Policy Assignment Console</title>
+    <meta name="theme-color" content="#f7f8f6" />
+    <title>Policy Assignment</title>
     <link rel="stylesheet" href="/admin/styles.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand"><span class="mark">P</span><div><strong>Policy Console</strong><small>Assignment control plane</small></div></div>
-      <label class="company-picker">Company <select id="company"></select></label>
-    </header>
-    <div class="shell">
-      <nav>
-        <button class="nav active" data-view="employees">Employees</button>
-        <button class="nav" data-view="rules">Rules & preview</button>
-        <button class="nav" data-view="jobs">Reconciliation</button>
-        <a href="/health" target="_blank">System health ↗</a>
-      </nav>
-      <main>
-        <div id="notice" class="notice hidden"></div>
-        <section id="employees" class="view active">
-          <div class="section-head"><div><p class="eyebrow">People</p><h1>Employee policies</h1><p>Inspect current policy state and the exact decision behind it.</p></div><button id="new-employee" class="primary">Add employee</button></div>
-          <div class="split">
-            <div class="panel list-panel"><input id="employee-search" placeholder="Search employees…" /><div id="employee-list" class="item-list"></div></div>
-            <div id="employee-detail" class="panel empty">Select an employee to inspect attributes, groups, and policies.</div>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+        <div class="brand-row">
+          <div class="product-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="brand-copy"><strong>Policy Assignment</strong><span>Operations console</span></div>
+          <button class="icon-button sidebar-close" id="sidebar-close" aria-label="Close navigation"></button>
+        </div>
+        <div class="workspace-switcher">
+          <label for="company">Workspace</label>
+          <div class="select-wrap"><select id="company" aria-label="Current company"></select><span data-icon="chevrons"></span></div>
+        </div>
+        <nav id="primary-nav"></nav>
+        <div class="sidebar-footer">
+          <div class="system-state"><span class="health-dot" id="health-dot"></span><span><strong id="health-label">Checking system</strong><small>PostgreSQL + worker queue</small></span></div>
+          <button class="nav-item" data-route="settings"><span data-icon="settings"></span><span>Settings</span></button>
+        </div>
+      </aside>
+      <button class="sidebar-scrim" id="sidebar-scrim" aria-label="Close navigation"></button>
+
+      <section class="workspace">
+        <header class="app-header">
+          <div class="header-left">
+            <button class="icon-button sidebar-trigger" id="sidebar-trigger" aria-label="Open navigation"></button>
+            <div class="breadcrumbs" id="breadcrumbs" aria-label="Breadcrumb"></div>
           </div>
-        </section>
-        <section id="rules" class="view">
-          <div class="section-head"><div><p class="eyebrow">Configuration</p><h1>Rule editor</h1><p>Preview through the production resolver before publishing.</p></div></div>
-          <div class="rule-grid">
-            <form id="rule-form" class="panel form-grid">
-              <label>Rule key<input name="key" required placeholder="ca-compliance" /></label>
-              <label>Target policy<select name="policyId" required></select></label>
-              <label>Employee fact<select name="field"><option value="location">Location</option><option value="department">Department</option><option value="employment_type">Employment type</option><option value="is_manager">Is manager</option><option value="tenure_days">Tenure (days)</option></select></label>
-              <label>Operator<select name="operator"><option>EQ</option><option>NE</option><option>GT</option><option>GTE</option><option>LT</option><option>LTE</option><option>IN</option></select></label>
-              <label>Expected value<input name="value" required placeholder="CA" /></label>
-              <label>Priority<input name="priority" type="number" value="10" /></label>
-              <label>Effective from<input name="validFrom" type="date" required /></label>
-              <div class="actions"><button type="button" id="preview-rule">Preview impact</button><button type="submit" class="primary">Publish rule</button></div>
-            </form>
-            <div id="preview-results" class="panel empty">Configure a rule and run a preview to see exact assignment additions, removals, and changes.</div>
+          <div class="header-actions">
+            <button class="command-trigger" id="command-trigger"><span data-icon="search"></span><span>Search or jump to…</span><kbd>⌘ K</kbd></button>
+            <button class="icon-button" id="refresh-view" aria-label="Refresh current page"></button>
           </div>
-          <div class="panel"><h2>Published and draft versions</h2><div id="rule-list" class="table-wrap"></div></div>
-        </section>
-        <section id="jobs" class="view">
-          <div class="section-head"><div><p class="eyebrow">Operations</p><h1>Reconciliation jobs</h1><p>At-least-once delivery, retry state, and processing outcomes.</p></div><button id="full-reconcile">Queue full reconciliation</button></div>
-          <div id="job-list" class="panel table-wrap"></div>
-        </section>
-      </main>
+        </header>
+        <main id="main-content" tabindex="-1"><div class="page-loading" aria-label="Loading"><span></span><span></span><span></span></div></main>
+      </section>
     </div>
 
-    <dialog id="employee-dialog"><form id="employee-form" method="dialog" class="form-grid"><div class="dialog-head"><h2>Add employee</h2><button value="cancel" class="icon">×</button></div><label>External ID<input name="externalId" required /></label><label>Display name<input name="displayName" required /></label><label>Email<input name="email" type="email" /></label><label>Location<input name="location" /></label><label>Department<input name="department" /></label><label>Employment type<input name="employmentType" /></label><label>Hire date<input name="hireDate" type="date" /></label><label class="checkbox"><input name="isManager" type="checkbox" /> Manager</label><div class="actions"><button value="cancel">Cancel</button><button type="submit" class="primary">Create employee</button></div></form></dialog>
-    <dialog id="why-dialog"><div class="dialog-head"><h2>Why this policy?</h2><button class="icon" onclick="this.closest('dialog').close()">×</button></div><div id="why-content"></div></dialog>
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <dialog class="modal" id="modal" aria-labelledby="modal-title"><div id="modal-content"></div></dialog>
+    <dialog class="drawer" id="drawer" aria-labelledby="drawer-title"><div id="drawer-content"></div></dialog>
+    <dialog class="drawer inspector" id="inspector" aria-labelledby="inspector-title"><div id="inspector-content"></div></dialog>
+    <dialog class="command-dialog" id="command-dialog" aria-labelledby="command-title">
+      <div class="command-search"><span data-icon="search"></span><input id="command-input" aria-label="Search commands" placeholder="Search pages and actions" autocomplete="off" /></div>
+      <div id="command-results" role="listbox"></div>
+      <footer><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></footer>
+    </dialog>
+    <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+      <form method="dialog">
+        <div class="confirm-icon" id="confirm-icon"></div>
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-message"></p>
+        <div class="dialog-actions"><button value="cancel">Cancel</button><button class="button-danger" value="confirm" id="confirm-action">Confirm</button></div>
+      </form>
+    </dialog>
+
     <script type="module" src="/admin/app.js"></script>
   </body>
 </html>

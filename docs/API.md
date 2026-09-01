@@ -18,9 +18,10 @@ Invalid bodies return structured `400 VALIDATION_ERROR`; cross-tenant/missing en
 ## Employees
 
 - `POST /employees`
-- `GET /employees`
+- `GET /employees` — server-side search, facets, sorting, and pagination (`facets=false` omits facet aggregation for typeahead requests)
 - `GET /employees/:id`
 - `PATCH /employees/:id` — creates an immutable effective-dated version
+- `POST /employees/preview` — exact assignment impact for proposed create/edit facts and groups; no writes
 
 ```json
 {
@@ -33,11 +34,14 @@ Invalid bodies return structured `400 VALIDATION_ERROR`; cross-tenant/missing en
   "isManager": false,
   "hireDate": "YYYY-MM-DD",
   "attributes": {},
+  "groupIds": [],
   "effectiveFrom": "YYYY-MM-DD"
 }
 ```
 
 `externalId` is a stable company-scoped identity and is not mutable. Patchable facts and each changed arbitrary-attribute key drive dependency impact.
+
+Employee preview accepts the proposed fields, `groupIds`, optional `asOfDate`, and optional `employeeId`. With an employee ID, the response compares materialized current policies with the proposed snapshot. Without an employee ID, `externalId` and `displayName` are required and the baseline is empty. Each category contains named before/after policies, all matched candidates, condition traces, rejected competitors, and deterministic rejection reasons. Preview uses the production evaluator/resolver and never writes source facts or assignments.
 
 Updates to existing employees, memberships, policies, published rule versions, and overrides cannot be backdated. Future-effective writes are accepted and their jobs remain unavailable until the effective date.
 
@@ -139,3 +143,10 @@ The explanation response includes the exact employee snapshot, winning source/ve
 - `GET /reconciliation/jobs` — latest 200 jobs with attempts/errors/timestamps
 
 Normal source APIs already enqueue precise reconciliation transactionally. The full trigger is an operational correctness/backfill tool, not the normal mutation path.
+
+The admin application also uses:
+
+- `GET /overview` — live resource/assignment/exception counts plus recent activity
+- `GET /activity?limit=…` — source changes enriched with affected decision scopes
+- `GET /employees/:id/activity` — employee fact versions, assignment history, overrides, and decisions
+- `GET /groups/:id?search=…&limit=…&offset=…` — group details, dependencies, and current members
