@@ -3,9 +3,22 @@ import type { AppConfig } from '../config.js';
 import type { DbClient, DbPool } from '../db.js';
 import { inTransaction } from '../db.js';
 import { todayUtc } from '../domain/dates.js';
-import { ImpactAnalyzer } from './impact.js';
-import { claimJob, enqueueJob, markJobFailed, markJobSucceeded, type ReconciliationJob } from './jobs.js';
-import { ReconciliationService, type ReconciliationResult } from './reconciliation.js';
+import { emptyImpactAnalysisProfile, ImpactAnalyzer } from './impact.js';
+import {
+  claimJob,
+  enqueueJob,
+  FAN_OUT_PARTITION_SIZE,
+  markJobFailed,
+  markJobSucceeded,
+  partitionFanOutJob,
+  type ReconciliationJob,
+} from './jobs.js';
+import {
+  emptyReconciliationProfile,
+  ReconciliationService,
+  type ReconciliationProfile,
+  type ReconciliationResult,
+} from './reconciliation.js';
 
 interface ScheduledRow {
   company_id: string;
@@ -21,6 +34,18 @@ export interface JobProcessingReport {
   results: ReconciliationResult[];
   durationMs: number;
   error: string | null;
+  profile: JobExecutionProfile;
+}
+
+export interface JobExecutionProfile {
+  workerId: string;
+  impactAnalysisMs: number;
+  impactDatabaseMs: number;
+  impactAssemblyMs: number;
+  impactQueryCount: number;
+  fanOutPartitionsCreated: number;
+  jobCompletionWriteMs: number;
+  reconciliation: ReconciliationProfile;
 }
 
 export class ReconciliationWorker {
@@ -65,10 +90,15 @@ export class ReconciliationWorker {
     );
     if (job === null) return null;
     const started = performance.now();
+    const profile = emptyJobExecutionProfile(this.workerId);
     try {
-      const results = await this.processJob(job);
-      await markJobSucceeded(this.pool, job.id, this.workerId);
-      return { job, results, durationMs: performance.now() - started, error: null };
+      const results = await this.processJob(job, profile);
+      if (profile.fanOutPartitionsCreated === 0) {
+        const completionStarted = performance.now();
+        await markJobSucceeded(this.pool, job.id, this.workerId);
+        profile.jobCompletionWriteMs += performance.now() - completionStarted;
+      }
+      return { job, results, durationMs: performance.now() - started, error: null, profile };
     } catch (error) {
       await markJobFailed(this.pool, job, this.workerId, error, this.config.JOB_MAX_ATTEMPTS);
       return {
@@ -76,15 +106,33 @@ export class ReconciliationWorker {
         results: [],
         durationMs: performance.now() - started,
         error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        profile,
       };
     }
   }
 
-  async processJob(job: ReconciliationJob): Promise<ReconciliationResult[]> {
-    const scopes = await this.impact.analyze(job);
-    const asOfDate = todayUtc(this.clock);
+  async processJob(job: ReconciliationJob, profile = emptyJobExecutionProfile(this.workerId)): Promise<ReconciliationResult[]> {
+    const impact = emptyImpactAnalysisProfile();
+    const impactStarted = performance.now();
+    const scopes = await this.impact.analyze(job, impact);
+    profile.impactAnalysisMs += performance.now() - impactStarted;
+    profile.impactDatabaseMs += impact.databaseMs;
+    profile.impactAssemblyMs += Math.max(0, profile.impactAnalysisMs - impact.databaseMs);
+    profile.impactQueryCount += impact.queryCount;
+    const asOfDate = job.scope === 'FANOUT'
+      ? String(job.payload.asOfDate)
+      : todayUtc(this.clock);
+    if (job.scope === 'RULE' && scopes.length > FAN_OUT_PARTITION_SIZE) {
+      profile.fanOutPartitionsCreated = await partitionFanOutJob(this.pool, {
+        job,
+        workerId: this.workerId,
+        asOfDate,
+        scopes,
+      });
+      return [];
+    }
     const results: ReconciliationResult[] = [];
-    await this.reconciliation.prepareJob({ companyId: job.companyId, asOfDate, scopes });
+    await this.reconciliation.prepareJob({ companyId: job.companyId, asOfDate, scopes }, profile.reconciliation);
     try {
       let lastHeartbeat = Date.now();
       for (let offset = 0; offset < scopes.length; offset += RECONCILIATION_TRANSACTION_SIZE) {
@@ -105,7 +153,7 @@ export class ReconciliationWorker {
             categoryId: scope.categoryId,
             asOfDate,
             jobId: job.id,
-          }))),
+          })), profile.reconciliation),
         );
       }
     } finally {
@@ -165,6 +213,19 @@ export class ReconciliationWorker {
       if (!handled) await delay(this.config.WORKER_POLL_MS);
     }
   }
+}
+
+function emptyJobExecutionProfile(workerId: string): JobExecutionProfile {
+  return {
+    workerId,
+    impactAnalysisMs: 0,
+    impactDatabaseMs: 0,
+    impactAssemblyMs: 0,
+    impactQueryCount: 0,
+    fanOutPartitionsCreated: 0,
+    jobCompletionWriteMs: 0,
+    reconciliation: emptyReconciliationProfile(),
+  };
 }
 
 function delay(milliseconds: number): Promise<void> {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MUTATION_BATCH_SIZE,
   formatRegressionReport,
+  localizedReconciliationLatencies,
   type RegressionReport,
 } from '../../src/eval/regression.js';
 
@@ -41,6 +42,7 @@ describe('regression runner report', () => {
           },
         },
         localizedEndToEndConvergenceLatency: {
+          measurementBoundary: 'job start to materialization complete',
           overall: latency,
           byMutationClass: { employeeFact: latency, groupMembership: latency, manualOverride: latency },
         },
@@ -95,5 +97,17 @@ describe('regression runner report', () => {
     expect(output).not.toContain('Localized mutation throughput:');
     expect(output).not.toContain('Total eval runtime:');
     expect(output).not.toContain('Selected workers:');
+  });
+
+  it('measures localized reconciliation work instead of verification-batch residence', () => {
+    const batchResidenceMs = 60_000;
+    const samples = localizedReconciliationLatencies([
+      { job: { scope: 'EMPLOYEE' }, durationMs: 12, error: null },
+      { job: { scope: 'GROUP' }, durationMs: 18, error: null },
+      { job: { scope: 'OVERRIDE' }, durationMs: 9, error: null },
+      { job: { scope: 'RULE' }, durationMs: batchResidenceMs, error: null },
+    ]);
+    expect(samples).toEqual({ employeeFact: [12], groupMembership: [18], manualOverride: [9] });
+    expect(Object.values(samples).flat()).not.toContain(batchResidenceMs);
   });
 });

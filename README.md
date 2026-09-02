@@ -112,7 +112,7 @@ The primary report contains exactly five headline metrics:
 
 1. Assignment correctness against the independent full-recompute oracle.
 2. Business-transition conformance across location, department, compensation, role, tenure, and group semantics. This is checked independently of oracle agreement.
-3. Localized end-to-end convergence latency from API commit until correct materialization is visible, with employee-fact, group, and manual-override breakdowns.
+3. Localized production reconciliation latency from job processing start through successful assignment materialization and job completion, with employee-fact, group, and manual-override breakdowns. Evaluator verification-batch residence and oracle verification are excluded; the dedicated isolated benchmark separately measures true API commit-to-visible latency.
 4. Population fan-out completion time, including a measured change affecting at least 10% of the 50,000-person population.
 5. Rule-evaluation work avoided versus equivalent full recomputation, overall and by mutation class.
 

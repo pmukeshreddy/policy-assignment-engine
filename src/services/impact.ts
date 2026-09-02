@@ -21,6 +21,16 @@ const rulePayloadSchema = z.object({
 });
 const policyPayloadSchema = z.object({ policyId: z.string().uuid() });
 const directPayloadSchema = z.object({ employeeId: z.string().uuid(), categoryId: z.string().uuid() });
+const fanOutPayloadSchema = z.object({
+  parentJobId: z.string().uuid(),
+  asOfDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  partitionIndex: z.number().int().nonnegative(),
+  partitionCount: z.number().int().positive(),
+  scopes: z.array(z.object({
+    employeeId: z.string().uuid(),
+    categoryId: z.string().uuid(),
+  })).min(1).max(500),
+});
 
 interface DependencyRow {
   dependency_type: 'FIELD' | 'ATTRIBUTE' | 'GROUP';
@@ -29,23 +39,38 @@ interface DependencyRow {
   selector_value: unknown;
 }
 
+export interface ImpactAnalysisProfile {
+  databaseMs: number;
+  queryCount: number;
+}
+
+export function emptyImpactAnalysisProfile(): ImpactAnalysisProfile {
+  return { databaseMs: 0, queryCount: 0 };
+}
+
 export class ImpactAnalyzer {
   constructor(
     private readonly pool: DbPool,
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
-  async analyze(job: ReconciliationJob): Promise<ReconciliationScope[]> {
+  async analyze(job: ReconciliationJob, profile?: ImpactAnalysisProfile): Promise<ReconciliationScope[]> {
     const date = todayUtc(this.clock);
-    if (job.scope === 'EMPLOYEE') return this.employeeImpact(job.companyId, employeePayloadSchema.parse(job.payload), date);
-    if (job.scope === 'GROUP') return this.groupImpact(job.companyId, groupPayloadSchema.parse(job.payload), date);
-    if (job.scope === 'RULE') return this.ruleImpact(job.companyId, rulePayloadSchema.parse(job.payload), date);
-    if (job.scope === 'POLICY') return this.policyImpact(job.companyId, policyPayloadSchema.parse(job.payload), date);
+    if (job.scope === 'EMPLOYEE') return this.employeeImpact(job.companyId, employeePayloadSchema.parse(job.payload), date, profile);
+    if (job.scope === 'GROUP') return this.groupImpact(job.companyId, groupPayloadSchema.parse(job.payload), date, profile);
+    if (job.scope === 'RULE') return this.ruleImpact(job.companyId, rulePayloadSchema.parse(job.payload), date, profile);
+    if (job.scope === 'POLICY') return this.policyImpact(job.companyId, policyPayloadSchema.parse(job.payload), date, profile);
     if (job.scope === 'OVERRIDE' || job.scope === 'TEMPORAL') {
       const payload = directPayloadSchema.parse(job.payload);
       return [{ employeeId: payload.employeeId, categoryId: payload.categoryId }];
     }
-    if (job.scope === 'FULL') return this.fullCompanyImpact(job.companyId, date);
+    if (job.scope === 'FANOUT') {
+      const payload = fanOutPayloadSchema.parse(job.payload);
+      const keys = payload.scopes.map((scope) => `${scope.employeeId}:${scope.categoryId}`);
+      if (new Set(keys).size !== keys.length) throw new Error('Fan-out partition contains duplicate scopes');
+      return [...payload.scopes].sort(scopeOrder);
+    }
+    if (job.scope === 'FULL') return this.fullCompanyImpact(job.companyId, date, profile);
     throw new Error(`Unsupported reconciliation scope: ${job.scope satisfies never}`);
   }
 
@@ -54,20 +79,21 @@ export class ImpactAnalyzer {
     companyId: string,
     ruleVersionId: string,
     asOfDate: string,
+    profile?: ImpactAnalysisProfile,
   ): Promise<string[]> {
-    const dependencies = await db.query<DependencyRow>(
+    const dependencies = await profiledQuery(profile, () => db.query<DependencyRow>(
       `SELECT dependency_type, dependency_key, operator, selector_value
          FROM rule_dependencies
         WHERE company_id = $1 AND rule_version_id = $2 AND mandatory_selector
         ORDER BY CASE dependency_type WHEN 'GROUP' THEN 0 WHEN 'FIELD' THEN 1 ELSE 2 END,
                  dependency_key`,
       [companyId, ruleVersionId],
-    );
-    if (dependencies.rows.length === 0) return this.allEmployeeIds(db, companyId, asOfDate);
+    ));
+    if (dependencies.rows.length === 0) return this.allEmployeeIds(db, companyId, asOfDate, profile);
 
     let intersection: Set<string> | null = null;
     for (const dependency of dependencies.rows) {
-      const selected = await this.applySelector(db, companyId, dependency, asOfDate);
+      const selected = await this.applySelector(db, companyId, dependency, asOfDate, profile);
       if (selected === null) continue;
       if (intersection === null) {
         intersection = new Set(selected);
@@ -79,26 +105,27 @@ export class ImpactAnalyzer {
       }
       if (intersection.size === 0) return [];
     }
-    return intersection === null ? this.allEmployeeIds(db, companyId, asOfDate) : [...intersection].sort();
+    return intersection === null ? this.allEmployeeIds(db, companyId, asOfDate, profile) : [...intersection].sort();
   }
 
   private async employeeImpact(
     companyId: string,
     payload: z.infer<typeof employeePayloadSchema>,
     asOfDate: string,
+    profile?: ImpactAnalysisProfile,
   ): Promise<ReconciliationScope[]> {
     if (payload.categoryIds !== undefined) {
       return payload.categoryIds.map((categoryId) => ({ employeeId: payload.employeeId, categoryId }));
     }
     if (payload.changedFields === undefined || payload.changedFields.length === 0) {
-      const categories = await listCategoryIds(this.pool, companyId);
+      const categories = await profiledQuery(profile, () => listCategoryIds(this.pool, companyId));
       return categories.map((categoryId) => ({ employeeId: payload.employeeId, categoryId }));
     }
     const fields = payload.changedFields.filter((field) => !field.startsWith('attributes.'));
     const attributes = payload.changedFields
       .filter((field) => field.startsWith('attributes.'))
       .map((field) => field.slice('attributes.'.length));
-    const result = await this.pool.query<{ category_id: string }>(
+    const result = await profiledQuery(profile, () => this.pool.query<{ category_id: string }>(
       `SELECT DISTINCT p.category_id
          FROM rule_dependencies rd
          JOIN rule_versions rv ON rv.company_id = rd.company_id AND rv.id = rd.rule_version_id
@@ -113,7 +140,7 @@ export class ImpactAnalyzer {
           )
         ORDER BY p.category_id`,
       [companyId, fields, attributes, asOfDate],
-    );
+    ));
     return result.rows.map((row) => ({ employeeId: payload.employeeId, categoryId: row.category_id }));
   }
 
@@ -121,8 +148,9 @@ export class ImpactAnalyzer {
     companyId: string,
     payload: z.infer<typeof groupPayloadSchema>,
     asOfDate: string,
+    profile?: ImpactAnalysisProfile,
   ): Promise<ReconciliationScope[]> {
-    const result = await this.pool.query<{ category_id: string }>(
+    const result = await profiledQuery(profile, () => this.pool.query<{ category_id: string }>(
       `SELECT DISTINCT p.category_id
          FROM rule_dependencies rd
          JOIN rule_versions rv ON rv.company_id = rd.company_id AND rv.id = rd.rule_version_id
@@ -135,7 +163,7 @@ export class ImpactAnalyzer {
           AND (rv.valid_to IS NULL OR rv.valid_to > $3::date)
         ORDER BY p.category_id`,
       [companyId, payload.groupId, asOfDate],
-    );
+    ));
     return result.rows.map((row) => ({ employeeId: payload.employeeId, categoryId: row.category_id }));
   }
 
@@ -143,19 +171,20 @@ export class ImpactAnalyzer {
     companyId: string,
     payload: z.infer<typeof rulePayloadSchema>,
     asOfDate: string,
+    profile?: ImpactAnalysisProfile,
   ): Promise<ReconciliationScope[]> {
     const versionIds = [payload.ruleVersionId, payload.previousRuleVersionId].filter((id): id is string => id !== undefined);
-    const categoryResult = await this.pool.query<{ id: string; category_id: string }>(
+    const categoryResult = await profiledQuery(profile, () => this.pool.query<{ id: string; category_id: string }>(
       `SELECT rv.id, p.category_id
          FROM rule_versions rv
          JOIN policies p ON p.company_id = rv.company_id AND p.id = rv.policy_id
         WHERE rv.company_id = $1 AND rv.id = ANY($2::uuid[])`,
       [companyId, versionIds],
-    );
+    ));
     if (categoryResult.rows.length !== versionIds.length) throw new Error('Rule impact references a missing or cross-tenant version');
     const employees = new Map<string, Set<string>>();
     for (const version of categoryResult.rows) {
-      const ids = await this.candidateEmployeesForRuleVersion(this.pool, companyId, version.id, asOfDate);
+      const ids = await this.candidateEmployeesForRuleVersion(this.pool, companyId, version.id, asOfDate, profile);
       for (const employeeId of ids) {
         const categories = employees.get(employeeId) ?? new Set<string>();
         categories.add(version.category_id);
@@ -171,35 +200,40 @@ export class ImpactAnalyzer {
     companyId: string,
     payload: z.infer<typeof policyPayloadSchema>,
     asOfDate: string,
+    profile?: ImpactAnalysisProfile,
   ): Promise<ReconciliationScope[]> {
-    const category = await this.pool.query<{ category_id: string }>(
+    const category = await profiledQuery(profile, () => this.pool.query<{ category_id: string }>(
       'SELECT category_id FROM policies WHERE company_id = $1 AND id = $2',
       [companyId, payload.policyId],
-    );
+    ));
     const categoryId = category.rows[0]?.category_id;
     if (categoryId === undefined) throw new Error('Policy impact references a missing or cross-tenant policy');
     const employeeIds = new Set<string>();
-    const assigned = await this.pool.query<{ employee_id: string }>(
+    const assigned = await profiledQuery(profile, () => this.pool.query<{ employee_id: string }>(
       `SELECT employee_id FROM materialized_assignments
         WHERE company_id = $1 AND policy_id = $2`,
       [companyId, payload.policyId],
-    );
+    ));
     assigned.rows.forEach((row) => employeeIds.add(row.employee_id));
-    const versions = await this.pool.query<{ id: string }>(
+    const versions = await profiledQuery(profile, () => this.pool.query<{ id: string }>(
       `SELECT id FROM rule_versions
         WHERE company_id = $1 AND policy_id = $2 AND status = 'PUBLISHED'
           AND (valid_to IS NULL OR valid_to > $3::date)`,
       [companyId, payload.policyId, asOfDate],
-    );
+    ));
     for (const version of versions.rows) {
-      const candidates = await this.candidateEmployeesForRuleVersion(this.pool, companyId, version.id, asOfDate);
+      const candidates = await this.candidateEmployeesForRuleVersion(this.pool, companyId, version.id, asOfDate, profile);
       candidates.forEach((employeeId) => employeeIds.add(employeeId));
     }
     return [...employeeIds].sort().map((employeeId) => ({ employeeId, categoryId }));
   }
 
-  private async fullCompanyImpact(companyId: string, asOfDate: string): Promise<ReconciliationScope[]> {
-    const result = await this.pool.query<{ employee_id: string; category_id: string }>(
+  private async fullCompanyImpact(
+    companyId: string,
+    asOfDate: string,
+    profile?: ImpactAnalysisProfile,
+  ): Promise<ReconciliationScope[]> {
+    const result = await profiledQuery(profile, () => this.pool.query<{ employee_id: string; category_id: string }>(
       `SELECT e.id AS employee_id, pc.id AS category_id
          FROM employees e
          JOIN employee_versions ev
@@ -209,18 +243,23 @@ export class ImpactAnalyzer {
         WHERE e.company_id = $1 AND pc.company_id = $1
         ORDER BY e.id, pc.id`,
       [companyId, asOfDate],
-    );
+    ));
     return result.rows.map((row) => ({ employeeId: row.employee_id, categoryId: row.category_id }));
   }
 
-  private async allEmployeeIds(db: Queryable, companyId: string, asOfDate: string): Promise<string[]> {
-    const result = await db.query<{ id: string }>(
+  private async allEmployeeIds(
+    db: Queryable,
+    companyId: string,
+    asOfDate: string,
+    profile?: ImpactAnalysisProfile,
+  ): Promise<string[]> {
+    const result = await profiledQuery(profile, () => db.query<{ id: string }>(
       `SELECT e.id FROM employees e
         JOIN employee_versions ev ON ev.company_id = e.company_id AND ev.employee_id = e.id
           AND ev.valid_from <= $2::date AND (ev.valid_to IS NULL OR ev.valid_to > $2::date)
         WHERE e.company_id = $1 ORDER BY e.id`,
       [companyId, asOfDate],
-    );
+    ));
     return result.rows.map((row) => row.id);
   }
 
@@ -229,9 +268,10 @@ export class ImpactAnalyzer {
     companyId: string,
     dependency: DependencyRow,
     asOfDate: string,
+    profile?: ImpactAnalysisProfile,
   ): Promise<string[] | null> {
     if (dependency.dependency_type === 'GROUP' && dependency.operator === 'MEMBER_OF') {
-      const result = await db.query<{ employee_id: string }>(
+      const result = await profiledQuery(profile, () => db.query<{ employee_id: string }>(
         `SELECT gm.employee_id
            FROM group_memberships gm
            JOIN employee_versions ev
@@ -241,7 +281,7 @@ export class ImpactAnalyzer {
             AND gm.valid_from <= $3::date AND (gm.valid_to IS NULL OR gm.valid_to > $3::date)
           ORDER BY gm.employee_id`,
         [companyId, dependency.dependency_key, asOfDate],
-      );
+      ));
       return result.rows.map((row) => row.employee_id);
     }
     if (dependency.operator !== 'EQ' && dependency.operator !== 'IN') return null;
@@ -269,7 +309,7 @@ export class ImpactAnalyzer {
     const predicate = dependency.operator === 'EQ'
       ? `${expression} = $3::jsonb`
       : `$3::jsonb @> jsonb_build_array(${expression})`;
-    const result = await db.query<{ id: string }>(
+    const result = await profiledQuery(profile, () => db.query<{ id: string }>(
       `SELECT e.id
          FROM employees e
          JOIN employee_versions ev
@@ -278,8 +318,20 @@ export class ImpactAnalyzer {
         WHERE e.company_id = $1 AND ${predicate}
         ORDER BY e.id`,
       parameters,
-    );
+    ));
     return result.rows.map((row) => row.id);
+  }
+}
+
+async function profiledQuery<T>(profile: ImpactAnalysisProfile | undefined, query: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  try {
+    return await query();
+  } finally {
+    if (profile !== undefined) {
+      profile.databaseMs += performance.now() - started;
+      profile.queryCount += 1;
+    }
   }
 }
 

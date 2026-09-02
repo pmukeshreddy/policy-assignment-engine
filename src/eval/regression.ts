@@ -190,6 +190,7 @@ export interface RegressionReport {
       mutationOutcomes: MutationOutcomeCounts;
     };
     localizedEndToEndConvergenceLatency: {
+      measurementBoundary: string;
       overall: LatencyDistribution;
       byMutationClass: Record<LocalizedLatencyClass, LatencyDistribution>;
     };
@@ -441,10 +442,9 @@ export async function runRegressionEvaluation(
       }
       const drained = mergeDrainedJobs(drainedParts);
       const convergenceVisibleAtMs = performance.now();
-      for (const effect of batchEffects) {
-        if (effect.committedAtMs !== undefined && effect.latencyClass !== undefined) {
-          localizedLatencySamples[effect.latencyClass].push(convergenceVisibleAtMs - effect.committedAtMs);
-        }
+      const measuredLatencies = localizedReconciliationLatencies(drained.reports);
+      for (const classification of Object.keys(measuredLatencies) as LocalizedLatencyClass[]) {
+        localizedLatencySamples[classification].push(...measuredLatencies[classification]);
       }
       await assertQueueDrained(pool, context.companyId);
       Object.assign(activeBatch!, {
@@ -617,6 +617,7 @@ export async function runRegressionEvaluation(
           mutationOutcomes,
         },
         localizedEndToEndConvergenceLatency: {
+          measurementBoundary: 'reconciliation job processing start through successful assignment materialization and job completion; excludes evaluator batch residence and oracle verification',
           overall: latencyDistribution(allLocalizedLatencies),
           byMutationClass: {
             employeeFact: latencyDistribution(localizedLatencySamples.employeeFact),
@@ -1279,7 +1280,7 @@ function accumulateRuleWork(
       ? 'groupMembership'
       : report.job.scope === 'OVERRIDE'
         ? 'manualOverride'
-        : report.job.scope === 'RULE'
+        : report.job.scope === 'RULE' || report.job.scope === 'FANOUT'
           ? 'ruleChange'
           : report.job.scope === 'POLICY'
             ? 'policyChange'
@@ -1317,17 +1318,19 @@ async function drainWorkers(workers: readonly ReconciliationWorker[]): Promise<D
   const started = performance.now();
   const reports: JobProcessingReport[] = [];
   const errors: string[] = [];
-  await Promise.all(workers.map(async (worker) => {
-    while (true) {
-      const report = await worker.processNext();
-      if (report === null) return;
+  while (true) {
+    const round = await Promise.all(workers.map((worker) => worker.processNext()));
+    let claimed = 0;
+    for (const report of round) {
+      if (report === null) continue;
+      claimed += 1;
       reports.push(report);
       if (report.error !== null) {
         errors.push(`Reconciliation job ${report.job.id} failed: ${report.error}`);
-        return;
       }
     }
-  }));
+    if (errors.length > 0 || claimed === 0) break;
+  }
   if (errors.length > 0) throw new Error(errors.sort().join('; '));
   reports.sort((left, right) => left.job.id.localeCompare(right.job.id));
   let rulesEvaluated = 0;
@@ -1345,6 +1348,28 @@ async function drainWorkers(workers: readonly ReconciliationWorker[]): Promise<D
     scopeKeys,
     durationMs: performance.now() - started,
   };
+}
+
+export function localizedReconciliationLatencies(
+  reports: readonly { job: { scope: JobScope }; durationMs: number; error: string | null }[],
+): Record<LocalizedLatencyClass, number[]> {
+  const samples: Record<LocalizedLatencyClass, number[]> = {
+    employeeFact: [],
+    groupMembership: [],
+    manualOverride: [],
+  };
+  for (const report of reports) {
+    if (report.error !== null) continue;
+    const classification: LocalizedLatencyClass | null = report.job.scope === 'EMPLOYEE'
+      ? 'employeeFact'
+      : report.job.scope === 'GROUP'
+        ? 'groupMembership'
+        : report.job.scope === 'OVERRIDE'
+          ? 'manualOverride'
+          : null;
+    if (classification !== null) samples[classification].push(report.durationMs);
+  }
+  return samples;
 }
 
 function mergeDrainedJobs(parts: readonly DrainedJobs[]): DrainedJobs {
@@ -1605,6 +1630,7 @@ export function formatRegressionReport(report: RegressionReport): string {
     outcomeLine('groupMembership'),
     '',
     '3. Localized end-to-end convergence latency',
+    `Measurement boundary: ${latency.measurementBoundary}`,
     line('Overall p50 / p95 / p99:', `${latency.overall.p50Ms} / ${latency.overall.p95Ms} / ${latency.overall.p99Ms} ms`),
     line('   Employee fact p95:', `${latency.byMutationClass.employeeFact.p95Ms} ms`),
     line('   Group membership p95:', `${latency.byMutationClass.groupMembership.p95Ms} ms`),

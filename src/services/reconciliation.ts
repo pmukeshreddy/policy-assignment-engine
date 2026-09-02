@@ -34,6 +34,74 @@ interface EvaluatedScope {
   evaluation: ReturnType<PolicyEvaluator['evaluateCategory']>;
 }
 
+export interface ReconciliationProfile {
+  stageMs: {
+    ruleFactLoading: number;
+    employeeSnapshotLoading: number;
+    categoryRuleLoading: number;
+    overrideLoading: number;
+    transactionTotal: number;
+    transactionCommitAndOverhead: number;
+    advisoryLock: number;
+    evaluationResolution: number;
+    decisionWrites: number;
+    assignmentReads: number;
+    diffPlanning: number;
+    assignmentHistoryWrites: number;
+    materializedAssignmentWrites: number;
+    scheduledTransitionWrites: number;
+  };
+  counts: {
+    batches: number;
+    scopes: number;
+    ruleEvaluations: number;
+    decisionsReused: number;
+    decisionsInserted: number;
+    assignmentInserts: number;
+    assignmentRemovals: number;
+    historyRowsInserted: number;
+    historyRowsClosed: number;
+    historyRowsDeleted: number;
+    scheduledRowsInserted: number;
+    scheduledRowsDeleted: number;
+  };
+}
+
+export function emptyReconciliationProfile(): ReconciliationProfile {
+  return {
+    stageMs: {
+      ruleFactLoading: 0,
+      employeeSnapshotLoading: 0,
+      categoryRuleLoading: 0,
+      overrideLoading: 0,
+      transactionTotal: 0,
+      transactionCommitAndOverhead: 0,
+      advisoryLock: 0,
+      evaluationResolution: 0,
+      decisionWrites: 0,
+      assignmentReads: 0,
+      diffPlanning: 0,
+      assignmentHistoryWrites: 0,
+      materializedAssignmentWrites: 0,
+      scheduledTransitionWrites: 0,
+    },
+    counts: {
+      batches: 0,
+      scopes: 0,
+      ruleEvaluations: 0,
+      decisionsReused: 0,
+      decisionsInserted: 0,
+      assignmentInserts: 0,
+      assignmentRemovals: 0,
+      historyRowsInserted: 0,
+      historyRowsClosed: 0,
+      historyRowsDeleted: 0,
+      scheduledRowsInserted: 0,
+      scheduledRowsDeleted: 0,
+    },
+  };
+}
+
 export interface ReconciliationResult {
   employeeId: string;
   categoryId: string;
@@ -72,19 +140,29 @@ export class ReconciliationService {
     companyId: string;
     asOfDate: string;
     scopes: readonly { employeeId: string; categoryId: string }[];
-  }): Promise<void> {
+  }, profile?: ReconciliationProfile): Promise<void> {
+    const loadingStarted = performance.now();
     const employeeIds = [...new Set(input.scopes.map((scope) => scope.employeeId))];
     const categoryIds = [...new Set(input.scopes.map((scope) => scope.categoryId))];
+    const snapshotStarted = performance.now();
     const snapshots = await loadEmployeeSnapshots(this.pool, input.companyId, employeeIds, input.asOfDate);
+    if (profile !== undefined) profile.stageMs.employeeSnapshotLoading += performance.now() - snapshotStarted;
     const categories = new Map<string, CategoryRecord>();
     const rules = new Map<string, EvaluatableRule[]>();
+    const rulesStarted = performance.now();
     for (const categoryId of categoryIds) {
       const category = await loadCategory(this.pool, input.companyId, categoryId);
       if (category === null) throw new Error(`Policy category ${categoryId} does not exist in the company`);
       categories.set(categoryId, category);
       rules.set(categoryId, await loadRulesForCategory(this.pool, input.companyId, categoryId, input.asOfDate));
     }
+    if (profile !== undefined) profile.stageMs.categoryRuleLoading += performance.now() - rulesStarted;
+    const overridesStarted = performance.now();
     const overrides = await loadOverridesForScopes(this.pool, input.companyId, employeeIds, input.asOfDate);
+    if (profile !== undefined) {
+      profile.stageMs.overrideLoading += performance.now() - overridesStarted;
+      profile.stageMs.ruleFactLoading += performance.now() - loadingStarted;
+    }
     this.prepared = { companyId: input.companyId, asOfDate: input.asOfDate, snapshots, categories, rules, overrides };
   }
 
@@ -101,14 +179,33 @@ export class ReconciliationService {
    * Reconciles a bounded collection atomically. Workers use small batches to avoid one
    * COMMIT per employee/category while retaining short transactions and retry safety.
    */
-  async reconcileEmployeeCategories(inputs: readonly ReconciliationInput[]): Promise<ReconciliationResult[]> {
+  async reconcileEmployeeCategories(
+    inputs: readonly ReconciliationInput[],
+    profile?: ReconciliationProfile,
+  ): Promise<ReconciliationResult[]> {
     if (inputs.length === 0) return [];
-    return inTransaction(this.pool, (client) => this.reconcileBatchWithClient(client, inputs));
+    const transactionStarted = performance.now();
+    let transactionBodyMs = 0;
+    const results = await inTransaction(this.pool, async (client) => {
+      const bodyStarted = performance.now();
+      try {
+        return await this.reconcileBatchWithClient(client, inputs, profile);
+      } finally {
+        transactionBodyMs += performance.now() - bodyStarted;
+      }
+    });
+    if (profile !== undefined) {
+      const total = performance.now() - transactionStarted;
+      profile.stageMs.transactionTotal += total;
+      profile.stageMs.transactionCommitAndOverhead += Math.max(0, total - transactionBodyMs);
+    }
+    return results;
   }
 
   private async reconcileBatchWithClient(
     client: DbClient,
     inputs: readonly ReconciliationInput[],
+    profile?: ReconciliationProfile,
   ): Promise<ReconciliationResult[]> {
     const companies = new Set(inputs.map((input) => input.companyId));
     const scopeKeys = inputs.map((input) => scopeKey(input.employeeId, input.categoryId));
@@ -116,16 +213,33 @@ export class ReconciliationService {
     if (new Set(scopeKeys).size !== inputs.length) throw new Error('A reconciliation batch contains duplicate scopes');
     const companyId = inputs[0]!.companyId;
     const requested = inputs.map((input) => ({ employee_id: input.employeeId, category_id: input.categoryId }));
+    if (profile !== undefined) {
+      profile.counts.batches += 1;
+      profile.counts.scopes += inputs.length;
+    }
+    const lockStarted = performance.now();
     await client.query(
       `SELECT pg_advisory_xact_lock(hashtext(locks.employee_id::text), hashtext(locks.category_id::text))
          FROM jsonb_to_recordset($1::jsonb) AS locks(employee_id uuid, category_id uuid)
         ORDER BY locks.employee_id, locks.category_id`,
       [JSON.stringify(requested)],
     );
+    if (profile !== undefined) profile.stageMs.advisoryLock += performance.now() - lockStarted;
 
     const evaluated: EvaluatedScope[] = [];
+    const evaluationStarted = performance.now();
     for (const input of inputs) evaluated.push(await this.evaluateScope(client, input));
-    const decisionIds = await this.persistDecisions(client, companyId, evaluated);
+    if (profile !== undefined) {
+      profile.stageMs.evaluationResolution += performance.now() - evaluationStarted;
+      profile.counts.ruleEvaluations += evaluated.reduce(
+        (count, scope) => count + scope.evaluation.ruleEvaluations.length,
+        0,
+      );
+    }
+    const decisionsStarted = performance.now();
+    const decisionIds = await this.persistDecisions(client, companyId, evaluated, profile);
+    if (profile !== undefined) profile.stageMs.decisionWrites += performance.now() - decisionsStarted;
+    const assignmentReadStarted = performance.now();
     const currentResult = await client.query<MaterializedRow>(
       `WITH requested AS (
          SELECT employee_id, category_id
@@ -140,6 +254,8 @@ export class ReconciliationService {
         FOR UPDATE OF assignments`,
       [companyId, JSON.stringify(requested)],
     );
+    if (profile !== undefined) profile.stageMs.assignmentReads += performance.now() - assignmentReadStarted;
+    const diffStarted = performance.now();
     const currentByScope = new Map<string, Map<string, MaterializedRow>>();
     for (const row of currentResult.rows) {
       const key = scopeKey(row.employee_id, row.category_id);
@@ -192,9 +308,12 @@ export class ReconciliationService {
         nextTransitionDate: scope.evaluation.nextTransitionDate,
       });
     }
+    if (profile !== undefined) profile.stageMs.diffPlanning += performance.now() - diffStarted;
 
-    await this.persistAssignmentDiff(client, companyId, removals, additions);
-    await this.replaceScheduledTransitionsBatch(client, companyId, evaluated);
+    await this.persistAssignmentDiff(client, companyId, removals, additions, profile);
+    const scheduleStarted = performance.now();
+    await this.replaceScheduledTransitionsBatch(client, companyId, evaluated, profile);
+    if (profile !== undefined) profile.stageMs.scheduledTransitionWrites += performance.now() - scheduleStarted;
     return results;
   }
 
@@ -231,6 +350,7 @@ export class ReconciliationService {
     client: DbClient,
     companyId: string,
     evaluated: readonly EvaluatedScope[],
+    profile?: ReconciliationProfile,
   ): Promise<Map<string, string>> {
     const lookup = evaluated.map((scope, ordinal) => ({
       ordinal,
@@ -256,6 +376,7 @@ export class ReconciliationService {
          ) decision ON true`,
       [companyId, JSON.stringify(lookup)],
     );
+    if (profile !== undefined) profile.counts.decisionsReused += existing.rows.length;
     const byOrdinal = new Map(existing.rows.map((row) => [row.ordinal, row.id]));
     const missing = evaluated.flatMap((scope, ordinal) => byOrdinal.has(ordinal) ? [] : [{
       employee_id: scope.input.employeeId,
@@ -286,6 +407,7 @@ export class ReconciliationService {
          RETURNING id, employee_id, category_id`,
         [companyId, JSON.stringify(missing)],
       );
+      if (profile !== undefined) profile.counts.decisionsInserted += inserted.rowCount ?? inserted.rows.length;
       for (const row of inserted.rows) {
         const ordinal = evaluated.findIndex((scope) => (
           scope.input.employeeId === row.employee_id && scope.input.categoryId === row.category_id
@@ -313,13 +435,19 @@ export class ReconciliationService {
       decisionId: string;
       asOfDate: string;
     }[],
+    profile?: ReconciliationProfile,
   ): Promise<void> {
+    if (profile !== undefined) {
+      profile.counts.assignmentRemovals += removals.length;
+      profile.counts.assignmentInserts += additions.length;
+    }
     if (removals.length > 0) {
       const records = removals.map((removal) => ({
         assignment_id: removal.assignmentId,
         as_of_date: removal.asOfDate,
       }));
-      await client.query(
+      const historyDeleteStarted = performance.now();
+      const deletedHistory = await client.query(
         `DELETE FROM assignment_history history
           USING jsonb_to_recordset($2::jsonb) AS removed(assignment_id uuid, as_of_date date)
           WHERE history.company_id = $1
@@ -328,7 +456,12 @@ export class ReconciliationService {
             AND history.valid_from >= removed.as_of_date`,
         [companyId, JSON.stringify(records)],
       );
-      await client.query(
+      if (profile !== undefined) {
+        profile.stageMs.assignmentHistoryWrites += performance.now() - historyDeleteStarted;
+        profile.counts.historyRowsDeleted += deletedHistory.rowCount ?? 0;
+      }
+      const historyCloseStarted = performance.now();
+      const closedHistory = await client.query(
         `UPDATE assignment_history history
             SET valid_to = removed.as_of_date
            FROM jsonb_to_recordset($2::jsonb) AS removed(assignment_id uuid, as_of_date date)
@@ -338,6 +471,11 @@ export class ReconciliationService {
             AND history.valid_from < removed.as_of_date`,
         [companyId, JSON.stringify(records)],
       );
+      if (profile !== undefined) {
+        profile.stageMs.assignmentHistoryWrites += performance.now() - historyCloseStarted;
+        profile.counts.historyRowsClosed += closedHistory.rowCount ?? 0;
+      }
+      const materializedDeleteStarted = performance.now();
       await client.query(
         `DELETE FROM materialized_assignments
           WHERE company_id = $1
@@ -347,6 +485,9 @@ export class ReconciliationService {
             )`,
         [companyId, JSON.stringify(records)],
       );
+      if (profile !== undefined) {
+        profile.stageMs.materializedAssignmentWrites += performance.now() - materializedDeleteStarted;
+      }
     }
     if (additions.length === 0) return;
     const records = additions.map((addition) => ({
@@ -358,6 +499,7 @@ export class ReconciliationService {
       decision_id: addition.decisionId,
       as_of_date: addition.asOfDate,
     }));
+    const materializedInsertStarted = performance.now();
     await client.query(
       `INSERT INTO materialized_assignments
          (id, company_id, employee_id, category_id, policy_id, slot_key, decision_id, effective_from)
@@ -369,7 +511,11 @@ export class ReconciliationService {
          )`,
       [companyId, JSON.stringify(records)],
     );
-    await client.query(
+    if (profile !== undefined) {
+      profile.stageMs.materializedAssignmentWrites += performance.now() - materializedInsertStarted;
+    }
+    const historyInsertStarted = performance.now();
+    const insertedHistory = await client.query(
       `INSERT INTO assignment_history
          (company_id, employee_id, category_id, policy_id, assignment_id, decision_id, valid_from)
        SELECT $1, records.employee_id, records.category_id, records.policy_id,
@@ -380,19 +526,24 @@ export class ReconciliationService {
          )`,
       [companyId, JSON.stringify(records)],
     );
+    if (profile !== undefined) {
+      profile.stageMs.assignmentHistoryWrites += performance.now() - historyInsertStarted;
+      profile.counts.historyRowsInserted += insertedHistory.rowCount ?? additions.length;
+    }
   }
 
   private async replaceScheduledTransitionsBatch(
     client: DbClient,
     companyId: string,
     evaluated: readonly EvaluatedScope[],
+    profile?: ReconciliationProfile,
   ): Promise<void> {
     const scopes = evaluated.map((scope) => ({
       employee_id: scope.input.employeeId,
       category_id: scope.input.categoryId,
       as_of_date: scope.input.asOfDate,
     }));
-    await client.query(
+    const deleted = await client.query(
       `DELETE FROM scheduled_evaluations scheduled
         USING jsonb_to_recordset($2::jsonb) AS scopes(employee_id uuid, category_id uuid, as_of_date date)
         WHERE scheduled.company_id = $1
@@ -402,6 +553,7 @@ export class ReconciliationService {
           AND scheduled.transition_date > scopes.as_of_date`,
       [companyId, JSON.stringify(scopes)],
     );
+    if (profile !== undefined) profile.counts.scheduledRowsDeleted += deleted.rowCount ?? 0;
     const transitions = evaluated.flatMap((scope) => scope.evaluation.transitions.map((transition) => ({
       employee_id: scope.input.employeeId,
       category_id: scope.input.categoryId,
@@ -411,7 +563,7 @@ export class ReconciliationService {
       reason: transition.reason,
     })));
     if (transitions.length === 0) return;
-    await client.query(
+    const inserted = await client.query(
       `INSERT INTO scheduled_evaluations
          (company_id, employee_id, source_type, source_id, rule_version_id, category_id, transition_date, reason)
        SELECT $1, transition.employee_id, transition.source_type, transition.source_id,
@@ -425,6 +577,7 @@ export class ReconciliationService {
        DO UPDATE SET processed_at = NULL, reason = EXCLUDED.reason`,
       [companyId, JSON.stringify(transitions)],
     );
+    if (profile !== undefined) profile.counts.scheduledRowsInserted += inserted.rowCount ?? transitions.length;
   }
 }
 
