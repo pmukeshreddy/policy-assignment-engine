@@ -62,6 +62,12 @@ export interface NycImportResult extends Omit<NycFetchResult, 'employees'> {
   reconciliationJobId: string;
 }
 
+export interface NycNameBackfillResult {
+  employeesMatched: number;
+  employeesNamed: number;
+  versionsUpdated: number;
+}
+
 export interface NycFetchOptions {
   targetCount?: number;
   pageSize?: number;
@@ -356,6 +362,130 @@ export async function persistNycEmployeeImport(
       })
       : null;
     return { importId, reconciliationJobId };
+}
+
+export async function backfillNycEmployeeNames(
+  pool: DbPool,
+  companyId: string,
+  fetched: NycFetchResult,
+): Promise<NycNameBackfillResult> {
+  if (fetched.employees.length < 1) throw new Error('Cannot backfill names from an empty NYC employee population');
+  return inTransaction(pool, async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', ['nyc-name-backfill', companyId]);
+    await stageEmployees(client, fetched.employees);
+    const validation = await client.query<{
+      imported_rows: number;
+      matched_rows: number;
+      named_rows: number;
+      fact_mismatches: number;
+      import_ids: number;
+    }>(
+      `SELECT count(*)::int AS imported_rows,
+              count(staged.external_id)::int AS matched_rows,
+              count(*) FILTER (WHERE staged.first_name IS NOT NULL AND staged.last_name IS NOT NULL)::int AS named_rows,
+              count(*) FILTER (WHERE staged.external_id IS NOT NULL AND (
+                records.source_row_id IS DISTINCT FROM staged.source_row_id
+                OR records.normalized_facts ->> 'externalId' IS DISTINCT FROM staged.external_id
+                OR records.normalized_facts ->> 'location' IS DISTINCT FROM staged.location
+                OR records.normalized_facts ->> 'department' IS DISTINCT FROM staged.department
+                OR records.normalized_facts ->> 'employmentType' IS DISTINCT FROM staged.employment_type
+                OR records.normalized_facts ->> 'hireDate' IS DISTINCT FROM staged.hire_date::text
+                OR records.normalized_facts -> 'attributes' IS DISTINCT FROM staged.attributes
+              ))::int AS fact_mismatches,
+              count(DISTINCT records.import_id)::int AS import_ids
+         FROM employees employee
+         JOIN employee_import_records records
+           ON records.company_id = employee.company_id AND records.employee_id = employee.id
+         LEFT JOIN nyc_employee_staging staged
+           ON staged.external_id = employee.external_id
+        WHERE employee.company_id = $1 AND records.dataset_id = $2`,
+      [companyId, NYC_DATASET_ID],
+    );
+    const checked = validation.rows[0];
+    if (checked === undefined
+      || checked.imported_rows !== fetched.employees.length
+      || checked.matched_rows !== fetched.employees.length
+      || checked.fact_mismatches !== 0
+      || checked.import_ids !== 1) {
+      throw new Error('Refusing to backfill NYC names because the persisted employee population does not exactly match the fetched source facts');
+    }
+    const versions = await client.query<{ count: number }>(
+      `WITH updated AS (
+         UPDATE employee_versions version
+            SET display_name = staged.display_name,
+                first_name = staged.first_name,
+                last_name = staged.last_name,
+                middle_initial = staged.middle_initial
+           FROM employees employee
+           JOIN nyc_employee_staging staged ON staged.external_id = employee.external_id
+          WHERE employee.company_id = $1
+            AND version.company_id = employee.company_id
+            AND version.employee_id = employee.id
+         RETURNING version.id
+       ) SELECT count(*)::int AS count FROM updated`,
+      [companyId],
+    );
+    await client.query(
+      `UPDATE employee_import_records records
+          SET normalized_facts = records.normalized_facts || jsonb_build_object(
+                'displayName', staged.display_name,
+                'firstName', staged.first_name,
+                'lastName', staged.last_name,
+                'middleInitial', staged.middle_initial
+              ),
+              source_record_checksum = staged.source_record_checksum
+         FROM employees employee
+         JOIN nyc_employee_staging staged ON staged.external_id = employee.external_id
+        WHERE employee.company_id = $1
+          AND records.company_id = employee.company_id
+          AND records.employee_id = employee.id
+          AND records.source_row_id = staged.source_row_id`,
+      [companyId],
+    );
+    await client.query(
+      `UPDATE dataset_imports imported
+          SET source_url = $3,
+              source_query = $4,
+              fetched_at = $5::timestamptz,
+              completed_at = now(),
+              requested_rows = $6,
+              fetched_rows = $7,
+              imported_rows = $6,
+              skipped_rows = $8,
+              checksum = $9,
+              skipped_reasons = $10::jsonb,
+              metadata = metadata || jsonb_build_object(
+                'fiscalYear', $11::text,
+                'nameFields', jsonb_build_array('first_name', 'last_name', 'mid_init'),
+                'namesBackfilledAt', now()
+              )
+        WHERE imported.company_id = $1
+          AND imported.id = (
+            SELECT records.import_id
+              FROM employee_import_records records
+             WHERE records.company_id = $1 AND records.dataset_id = $2
+             LIMIT 1
+          )`,
+      [
+        companyId,
+        NYC_DATASET_ID,
+        NYC_DATASET_URL,
+        fetched.sourceQuery,
+        fetched.fetchedAt,
+        fetched.employees.length,
+        fetched.fetchedRows,
+        fetched.skippedRows,
+        fetched.checksum,
+        JSON.stringify(fetched.skippedReasons),
+        fetched.fiscalYear,
+      ],
+    );
+    return {
+      employeesMatched: checked.matched_rows,
+      employeesNamed: checked.named_rows,
+      versionsUpdated: versions.rows[0]?.count ?? 0,
+    };
+  });
 }
 
 async function fetchRows(

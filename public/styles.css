@@ -285,11 +285,13 @@ dialog { color: var(--ink); }
 dialog::backdrop { background: rgb(22 31 26 / 44%); backdrop-filter: blur(2px); }
 .modal { width: min(820px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border: 0; border-radius: var(--radius-lg); box-shadow: var(--shadow-dialog); overflow: hidden; }
 .modal.wide { width: min(1040px, calc(100vw - 32px)); }
+.modal > #modal-content, .modal > #modal-content > form { max-height: inherit; display: flex; flex-direction: column; min-height: 0; }
+.modal-header, .stepper { flex: 0 0 auto; }
 .modal-header, .drawer-header { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-bottom: 1px solid var(--line); background: white; }
 .modal-header h2, .drawer-header h2 { margin: 0; font-size: 16px; }
 .modal-header p, .drawer-header p { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
-.modal-body { max-height: calc(100vh - 158px); padding: 20px; overflow: auto; }
-.modal-footer { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 18px; border-top: 1px solid var(--line); background: #fafbfa; }
+.modal-body { flex: 1 1 auto; min-height: 0; padding: 20px; overflow-y: auto; }
+.modal-footer { min-height: 64px; display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; gap: 12px; padding: 13px 18px; border-top: 1px solid var(--line); background: #fafbfa; }
 .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .drawer { width: min(680px, 94vw); height: 100vh; max-height: 100vh; margin: 0 0 0 auto; padding: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0; box-shadow: -18px 0 55px rgb(25 39 31 / 16%); overflow: hidden; }
 .drawer[open] { animation: drawer-in 150ms ease-out; }
@@ -649,8 +651,7 @@ dialog::backdrop { background: rgb(22 31 26 / 44%); backdrop-filter: blur(2px); 
   .field.full { grid-column: auto; }
   .group-checks { grid-template-columns: 1fr; }
   .modal { width: 100vw; max-height: 100vh; height: 100vh; border-radius: 0; }
-  .modal-body { max-height: calc(100vh - 158px); }
-  .modal-footer { position: sticky; bottom: 0; }
+  .modal > #modal-content { height: 100%; }
   .description-grid { grid-template-columns: 1fr; }
   .description-item:nth-child(even) { border-left: 0; }
   .description-item:nth-child(n+2) { border-top: 1px solid var(--line); }

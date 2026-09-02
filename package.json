@@ -25,6 +25,8 @@
     "benchmark:production-performance": "tsx scripts/benchmark-production-performance.ts",
     "data:nyc": "tsx scripts/import-nyc.ts",
     "data:nyc:start": "node dist/scripts/import-nyc.js",
+    "data:nyc:backfill-names": "tsx scripts/backfill-nyc-names.ts",
+    "data:nyc:backfill-names:start": "node dist/scripts/backfill-nyc-names.js",
     "eval:regression": "tsx scripts/run-regression-eval.ts",
     "eval:regression:start": "node dist/scripts/run-regression-eval.js",
     "test": "vitest run --exclude tests/integration/**",
