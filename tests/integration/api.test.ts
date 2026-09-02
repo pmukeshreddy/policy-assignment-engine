@@ -79,6 +79,7 @@ describe('PostgreSQL API, reconciliation, and history', () => {
 
     const initial = await request('GET', `/employees/${employee.id}/assignments`);
     expect(initial.data).toHaveLength(1);
+    expect(initial.meta).toEqual({ total: 1, limit: 100, offset: 0 });
     expect(initial.data[0].policy_key).toBe('enhanced');
     const initialAssignmentId = initial.data[0].assignment_id;
     const why = await request('GET', `/employees/${employee.id}/assignments/${initialAssignmentId}/explanation`);
@@ -169,6 +170,7 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     expect(manualWhy.decision.source).toBe('MANUAL');
 
     const historical = await request('GET', `/employees/${employee.id}/assignments/as-of?date=2026-08-01`);
+    expect(historical.meta).toEqual({ total: 1, limit: 100, offset: 0 });
     expect(historical.data.map((assignment: { policy_key: string }) => assignment.policy_key)).toEqual(['enhanced']);
 
     const service = new ReconciliationService(pool);

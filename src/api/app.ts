@@ -62,6 +62,13 @@ function presentEmployeeReference(row: Record<string, unknown>): Record<string, 
   };
 }
 
+function paginationQuery(defaultLimit: number, maxLimit = 500) {
+  return z.object({
+    limit: z.coerce.number().int().min(1).max(maxLimit).default(defaultLimit),
+    offset: z.coerce.number().int().min(0).default(0),
+  });
+}
+
 export function buildApp(input: {
   pool: DbPool;
   config: Pick<AppConfig, 'LOG_LEVEL' | 'PREVIEW_MAX_EMPLOYEES'>;
@@ -113,17 +120,27 @@ export function buildApp(input: {
     return reply.status(201).send(result.rows[0]);
   });
 
-  app.get('/companies', async () => {
-    const result = await input.pool.query(
+  app.get('/companies', async (request) => {
+    const query = paginationQuery(100).parse(request.query);
+    const [result, totalResult] = await Promise.all([input.pool.query(
       `SELECT c.id, c.name, c.created_at,
               CASE WHEN workspace.company_id IS NULL THEN 'STANDARD' ELSE 'NYC_OPEN_DATA_PRODUCT' END AS workspace_kind,
               workspace.imported_employee_count
          FROM companies c
          LEFT JOIN product_workspaces workspace ON workspace.company_id = c.id
         WHERE NOT EXISTS (SELECT 1 FROM evaluation_tenants evaluation WHERE evaluation.company_id = c.id)
-        ORDER BY CASE WHEN workspace.company_id IS NULL THEN 1 ELSE 0 END, c.created_at, c.id`,
-    );
-    return { data: result.rows };
+        ORDER BY CASE WHEN workspace.company_id IS NULL THEN 1 ELSE 0 END, c.created_at, c.id
+        LIMIT $1 OFFSET $2`,
+      [query.limit, query.offset],
+    ), input.pool.query<{ total: number }>(
+      `SELECT count(*)::int AS total
+         FROM companies c
+        WHERE NOT EXISTS (SELECT 1 FROM evaluation_tenants evaluation WHERE evaluation.company_id = c.id)`,
+    )]);
+    return {
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   registerEmployeeRoutes(app, input.pool, clock);
@@ -214,7 +231,8 @@ export function buildApp(input: {
 
   app.get('/reconciliation/jobs', async (request) => {
     const companyId = companyIdFrom(request);
-    const result = await input.pool.query(
+    const query = paginationQuery(200).parse(request.query);
+    const [result, totalResult] = await Promise.all([input.pool.query(
       `SELECT id, event_type, scope, payload, status, attempts, last_error,
               created_at, started_at, finished_at,
               CASE WHEN started_at IS NULL THEN NULL
@@ -225,16 +243,32 @@ export function buildApp(input: {
          FROM reconciliation_jobs
         WHERE company_id = $1
         ORDER BY created_at DESC, id DESC
-        LIMIT 200`,
+        LIMIT $2 OFFSET $3`,
+      [companyId, query.limit, query.offset],
+    ), input.pool.query<{ total: number }>(
+      'SELECT count(*)::int AS total FROM reconciliation_jobs WHERE company_id = $1',
       [companyId],
-    );
-    return { data: result.rows };
+    )]);
+    return {
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.get('/activity', async (request) => {
     const companyId = companyIdFrom(request);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(request.query);
-    return { data: await loadActivity(input.pool, companyId, query.limit) };
+    const query = paginationQuery(50, 200).parse(request.query);
+    const [data, totalResult] = await Promise.all([
+      loadActivity(input.pool, companyId, query.limit, query.offset),
+      input.pool.query<{ total: number }>(
+        'SELECT count(*)::int AS total FROM reconciliation_jobs WHERE company_id = $1',
+        [companyId],
+      ),
+    ]);
+    return {
+      data,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.get('/audit', async (request) => {
@@ -465,14 +499,19 @@ export function buildApp(input: {
     return {
       ...counts.rows[0] as Record<string, unknown>,
       source: source.rows[0] ?? null,
-      activity: await loadActivity(input.pool, companyId, 8),
+      activity: await loadActivity(input.pool, companyId, 8, 0),
     };
   });
 
   return app;
 }
 
-async function loadActivity(pool: DbPool, companyId: string, limit: number): Promise<Record<string, unknown>[]> {
+async function loadActivity(
+  pool: DbPool,
+  companyId: string,
+  limit: number,
+  offset: number,
+): Promise<Record<string, unknown>[]> {
   const result = await pool.query(
     `SELECT j.id, j.event_type, j.scope, j.payload, j.status, j.attempts,
             j.created_at, j.started_at, j.finished_at,
@@ -516,8 +555,8 @@ async function loadActivity(pool: DbPool, companyId: string, limit: number): Pro
        ) decisions ON true
       WHERE j.company_id = $1
       ORDER BY j.created_at DESC, j.id DESC
-      LIMIT $2`,
-    [companyId, limit],
+      LIMIT $2 OFFSET $3`,
+    [companyId, limit, offset],
   );
   return result.rows.map((raw) => {
     const row = presentEmployeeReference(raw as Record<string, unknown>);
@@ -1003,7 +1042,8 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
 
   app.get('/groups', async (request) => {
     const companyId = companyIdFrom(request);
-    const result = await pool.query(
+    const query = paginationQuery(100).parse(request.query);
+    const [result, totalResult] = await Promise.all([pool.query(
       `SELECT g.id, g.slug AS key, g.name, g.description,
               count(gm.id) FILTER (WHERE gm.valid_from <= CURRENT_DATE AND (gm.valid_to IS NULL OR gm.valid_to > CURRENT_DATE))::int AS member_count,
               (SELECT count(DISTINCT rv.rule_id)::int
@@ -1015,10 +1055,17 @@ function registerGroupRoutes(app: FastifyInstance, pool: DbPool, clock: () => Da
          LEFT JOIN group_memberships gm ON gm.company_id = g.company_id AND gm.group_id = g.id
         WHERE g.company_id = $1
         GROUP BY g.id
-        ORDER BY g.name, g.id`,
+        ORDER BY g.name, g.id
+        LIMIT $2 OFFSET $3`,
+      [companyId, query.limit, query.offset],
+    ), pool.query<{ total: number }>(
+      'SELECT count(*)::int AS total FROM groups WHERE company_id = $1',
       [companyId],
-    );
-    return { data: result.rows };
+    )]);
+    return {
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.get('/groups/:id', async (request) => {
@@ -1211,7 +1258,8 @@ function registerPolicyRoutes(app: FastifyInstance, pool: DbPool, clock: () => D
 
   app.get('/policy-categories', async (request) => {
     const companyId = companyIdFrom(request);
-    const result = await pool.query(
+    const query = paginationQuery(100).parse(request.query);
+    const [result, totalResult] = await Promise.all([pool.query(
       `SELECT pc.id, pc.key, pc.name, pc.cardinality,
               (SELECT count(*)::int FROM policies p
                 WHERE p.company_id = pc.company_id AND p.category_id = pc.id) AS policy_count,
@@ -1225,10 +1273,17 @@ function registerPolicyRoutes(app: FastifyInstance, pool: DbPool, clock: () => D
                 WHERE ma.company_id = pc.company_id AND ma.category_id = pc.id) AS assigned_employee_count
          FROM policy_categories pc
         WHERE pc.company_id = $1
-        ORDER BY pc.name, pc.id`,
+        ORDER BY pc.name, pc.id
+        LIMIT $2 OFFSET $3`,
+      [companyId, query.limit, query.offset],
+    ), pool.query<{ total: number }>(
+      'SELECT count(*)::int AS total FROM policy_categories WHERE company_id = $1',
       [companyId],
-    );
-    return { data: result.rows };
+    )]);
+    return {
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.patch('/policy-categories/:id', async (request) => {
@@ -1274,7 +1329,8 @@ function registerPolicyRoutes(app: FastifyInstance, pool: DbPool, clock: () => D
 
   app.get('/policies', async (request) => {
     const companyId = companyIdFrom(request);
-    const result = await pool.query(
+    const query = paginationQuery(200).parse(request.query);
+    const [result, totalResult] = await Promise.all([pool.query(
       `SELECT p.id, p.key, p.category_id, pc.key AS category_key, pc.name AS category_name, pc.cardinality,
               pv.id AS version_id, pv.version, pv.name, pv.description, pv.enabled,
               pv.valid_from, pv.valid_to, pv.metadata,
@@ -1289,10 +1345,17 @@ function registerPolicyRoutes(app: FastifyInstance, pool: DbPool, clock: () => D
          JOIN policy_categories pc ON pc.company_id = p.company_id AND pc.id = p.category_id
          JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.id = p.current_version_id
         WHERE p.company_id = $1
-        ORDER BY pc.name, pv.name, p.id`,
+        ORDER BY pc.name, pv.name, p.id
+        LIMIT $2 OFFSET $3`,
+      [companyId, query.limit, query.offset],
+    ), pool.query<{ total: number }>(
+      'SELECT count(*)::int AS total FROM policies WHERE company_id = $1',
       [companyId],
-    );
-    return { data: result.rows };
+    )]);
+    return {
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.post('/policies/:id/versions', async (request, reply) => {
@@ -1677,8 +1740,9 @@ function registerOverrideRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
 
   app.get('/manual-overrides', async (request) => {
     const companyId = companyIdFrom(request);
-    const query = z.object({ employeeId: uuidSchema.optional() }).parse(request.query);
-    const result = await pool.query(
+    const query = paginationQuery(100).extend({ employeeId: uuidSchema.optional() }).parse(request.query);
+    const parameters = [companyId, query.employeeId ?? null];
+    const [result, totalResult] = await Promise.all([pool.query(
       `SELECT mo.id, mo.employee_id, e.external_id AS employee_external_id,
               ev.display_name AS employee_display_name,
               ev.first_name AS employee_first_name,
@@ -1702,10 +1766,19 @@ function registerOverrideRoutes(app: FastifyInstance, pool: DbPool, clock: () =>
          JOIN policy_versions pv ON pv.company_id = p.company_id AND pv.policy_id = p.id
           AND pv.valid_from <= $3::date AND (pv.valid_to IS NULL OR pv.valid_to > $3::date)
         WHERE mo.company_id = $1 AND ($2::uuid IS NULL OR mo.employee_id = $2)
-        ORDER BY mo.created_at DESC, mo.id DESC`,
-      [companyId, query.employeeId ?? null],
-    );
-    return { data: result.rows.map((row) => presentEmployeeReference(row as Record<string, unknown>)) };
+        ORDER BY mo.created_at DESC, mo.id DESC
+        LIMIT $4 OFFSET $5`,
+      [...parameters, todayUtc(clock), query.limit, query.offset],
+    ), pool.query<{ total: number }>(
+      `SELECT count(*)::int AS total
+         FROM manual_overrides
+        WHERE company_id = $1 AND ($2::uuid IS NULL OR employee_id = $2)`,
+      parameters,
+    )]);
+    return {
+      data: result.rows.map((row) => presentEmployeeReference(row as Record<string, unknown>)),
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.delete('/manual-overrides/:id', async (request, reply) => {
@@ -1754,7 +1827,9 @@ function registerAssignmentRoutes(app: FastifyInstance, pool: DbPool, clock: () 
   app.get('/employees/:id/assignments', async (request) => {
     const companyId = companyIdFrom(request);
     const employeeId = idParam(request);
-    const result = await pool.query(
+    const query = paginationQuery(100).parse(request.query);
+    const asOfDate = todayUtc(clock);
+    const [result, totalResult, exists] = await Promise.all([pool.query(
       `SELECT ma.id AS assignment_id, ma.policy_id, p.key AS policy_key, pv.name AS policy_name,
               ma.category_id, pc.key AS category_key, pc.name AS category_name, pc.cardinality,
               ma.effective_from, ma.created_at,
@@ -1773,19 +1848,32 @@ function registerAssignmentRoutes(app: FastifyInstance, pool: DbPool, clock: () 
             LIMIT 1
          ) decision ON true
         WHERE ma.company_id = $1 AND ma.employee_id = $2
-        ORDER BY pc.name, pv.name, ma.id`,
-      [companyId, employeeId, todayUtc(clock)],
-    );
-    const exists = await pool.query('SELECT 1 FROM employees WHERE company_id = $1 AND id = $2', [companyId, employeeId]);
+        ORDER BY pc.name, pv.name, ma.id
+        LIMIT $4 OFFSET $5`,
+      [companyId, employeeId, asOfDate, query.limit, query.offset],
+    ), pool.query<{ total: number }>(
+      `SELECT count(*)::int AS total
+         FROM materialized_assignments
+        WHERE company_id = $1 AND employee_id = $2`,
+      [companyId, employeeId],
+    ), pool.query(
+      'SELECT 1 FROM employees WHERE company_id = $1 AND id = $2',
+      [companyId, employeeId],
+    )]);
     if (exists.rowCount !== 1) throw notFound('Employee');
-    return { asOfDate: todayUtc(clock), data: result.rows };
+    return {
+      asOfDate,
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.get('/employees/:id/assignments/as-of', async (request) => {
     const companyId = companyIdFrom(request);
     const employeeId = idParam(request);
-    const query = z.object({ date: z.string().date() }).parse(request.query);
-    const result = await pool.query(
+    const query = paginationQuery(100).extend({ date: z.string().date() }).parse(request.query);
+    const parameters = [companyId, employeeId, query.date];
+    const [result, totalResult] = await Promise.all([pool.query(
       `SELECT ah.assignment_id, ah.policy_id, p.key AS policy_key, pv.name AS policy_name,
               ah.category_id, pc.key AS category_key, pc.name AS category_name, pc.cardinality,
               ah.valid_from, ah.valid_to, ah.decision_id
@@ -1796,10 +1884,21 @@ function registerAssignmentRoutes(app: FastifyInstance, pool: DbPool, clock: () 
            AND pv.valid_from <= $3::date AND (pv.valid_to IS NULL OR pv.valid_to > $3::date)
         WHERE ah.company_id = $1 AND ah.employee_id = $2
           AND ah.valid_from <= $3::date AND (ah.valid_to IS NULL OR ah.valid_to > $3::date)
-        ORDER BY pc.name, pv.name, ah.assignment_id`,
-      [companyId, employeeId, query.date],
-    );
-    return { asOfDate: query.date, data: result.rows };
+        ORDER BY pc.name, pv.name, ah.assignment_id
+        LIMIT $4 OFFSET $5`,
+      [...parameters, query.limit, query.offset],
+    ), pool.query<{ total: number }>(
+      `SELECT count(*)::int AS total
+         FROM assignment_history
+        WHERE company_id = $1 AND employee_id = $2
+          AND valid_from <= $3::date AND (valid_to IS NULL OR valid_to > $3::date)`,
+      parameters,
+    )]);
+    return {
+      asOfDate: query.date,
+      data: result.rows,
+      meta: { total: totalResult.rows[0]?.total ?? 0, limit: query.limit, offset: query.offset },
+    };
   });
 
   app.get('/employees/:employeeId/assignments/:assignmentId/explanation', async (request) => {

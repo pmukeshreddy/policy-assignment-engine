@@ -9,10 +9,21 @@ Content-Type: application/json
 
 Invalid bodies return structured `400 VALIDATION_ERROR`; cross-tenant/missing entities return `404`; effective-date conflicts return `409`; invalid references/constraints return `422`. Normal 500 responses do not expose stack traces.
 
+Collection endpoints accept `limit` and `offset` and return:
+
+```json
+{
+  "data": [],
+  "meta": { "total": 0, "limit": 100, "offset": 0 }
+}
+```
+
+`total` is the exact count after resource filters are applied. `limit` must be at least 1 and `offset` must be non-negative. Employees, rules, activity, and other collections retain route-specific defaults and upper bounds appropriate to their payload size.
+
 ## Companies
 
 - `POST /companies` — `{ "name": "YOUR_COMPANY_NAME" }`
-- `GET /companies`
+- `GET /companies?limit=…&offset=…`
 - `GET /health`
 
 ## Employees
@@ -48,7 +59,7 @@ Updates to existing employees, memberships, policies, published rule versions, a
 ## Groups
 
 - `POST /groups` — `{ "key": "engineering", "name": "Engineering" }`
-- `GET /groups`
+- `GET /groups?limit=…&offset=…`
 - `PATCH /groups/:id` — mutable display name/description; the stable key and rule dependency ID do not change
 - `POST /groups/:id/members` — `{ "employeeId": "…", "effectiveFrom": "2026-08-30" }`
 - `DELETE /groups/:groupId/members/:employeeId?effectiveDate=2026-09-01`
@@ -58,10 +69,10 @@ Membership intervals cannot overlap for the same employee/group.
 ## Policies
 
 - `POST /policy-categories` — key, name, and `SINGLE`/`MULTIPLE`
-- `GET /policy-categories`
+- `GET /policy-categories?limit=…&offset=…`
 - `PATCH /policy-categories/:id` — display name only; cardinality is immutable
 - `POST /policies` — stable key/category plus first version
-- `GET /policies`
+- `GET /policies?limit=…&offset=…`
 - `POST /policies/:id/versions` — effective-dated name, description, enabled state, and metadata
 
 Category membership and cardinality are immutable after creation; this keeps historical resolution semantics stable.
@@ -112,7 +123,7 @@ A rule identity is permanently scoped to one policy category. To move logic to a
 ## Manual controls
 
 - `POST /manual-overrides`
-- `GET /manual-overrides?employeeId=…`
+- `GET /manual-overrides?employeeId=…&limit=…&offset=…`
 - `DELETE /manual-overrides/:id` — effective revocation, not physical deletion
 
 ```json
@@ -131,8 +142,8 @@ Manual precedence is above rules; priority resolves conflicts among manual contr
 
 ## Assignment reads and explanations
 
-- `GET /employees/:id/assignments` — materialized current state; no evaluation
-- `GET /employees/:id/assignments/as-of?date=2026-08-01`
+- `GET /employees/:id/assignments?limit=…&offset=…` — materialized current state; no evaluation
+- `GET /employees/:id/assignments/as-of?date=2026-08-01&limit=…&offset=…`
 - `GET /employees/:employeeId/assignments/:assignmentId/explanation?date=2026-08-01`
 
 The explanation response includes the exact employee snapshot, winning source/version/trace, all matched candidates, rejected competitors and reasons, decision timestamp, and next transition date.
@@ -140,13 +151,13 @@ The explanation response includes the exact employee snapshot, winning source/ve
 ## Reconciliation operations
 
 - `POST /reconciliation/trigger` — queue a low-priority full-company check
-- `GET /reconciliation/jobs` — latest 200 jobs with attempts/errors/timestamps
+- `GET /reconciliation/jobs?limit=…&offset=…` — newest jobs with attempts/errors/timestamps
 
 Normal source APIs already enqueue precise reconciliation transactionally. The full trigger is an operational correctness/backfill tool, not the normal mutation path.
 
 The admin application also uses:
 
 - `GET /overview` — live resource/assignment/exception counts plus recent activity
-- `GET /activity?limit=…` — source changes enriched with affected decision scopes
+- `GET /activity?limit=…&offset=…` — source changes enriched with affected decision scopes
 - `GET /employees/:id/activity` — employee fact versions, assignment history, overrides, and decisions
 - `GET /groups/:id?search=…&limit=…&offset=…` — group details, dependencies, and current members
