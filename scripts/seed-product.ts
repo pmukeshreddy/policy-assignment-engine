@@ -3,6 +3,8 @@ import { createPool, inTransaction, type DbClient } from '../src/db.js';
 import {
   CERTIFIED_RULE_COUNT,
   CERTIFIED_RULE_SEED,
+  CERTIFIED_GROUP_COUNT,
+  certifiedCategoryDefinitions,
   certifiedBaselineSemantics,
   createCertifiedBaseline,
 } from '../src/baseline/certified-universe.js';
@@ -38,6 +40,7 @@ const config = loadConfig();
 const pool = createPool(config);
 const lockClient = await pool.connect();
 const refreshNyc = process.argv.includes('--refresh-nyc');
+const rebuildBaseline = process.argv.includes('--rebuild-baseline');
 
 async function loadSourceImport(): Promise<SourceImport> {
   const result = await pool.query<SourceImport>(
@@ -96,8 +99,9 @@ async function removeObsoleteWorkspace(companyId: string): Promise<void> {
   });
 }
 
-async function createProductWorkspace(source: SourceImport): Promise<string> {
+async function createProductWorkspace(source: SourceImport, replaceCompanyId: string | null = null): Promise<string> {
   return inTransaction(pool, async (client) => {
+    if (replaceCompanyId !== null) await client.query('DELETE FROM companies WHERE id = $1', [replaceCompanyId]);
     await client.query(
       `DELETE FROM companies legacy
         WHERE legacy.name = 'Policy Assignment Demo'
@@ -124,7 +128,7 @@ async function createProductWorkspace(source: SourceImport): Promise<string> {
               metadata || jsonb_build_object(
                 'purpose', 'product-workspace',
                 'sourceImportId', id,
-                'semanticBaseline', 'certified-production-baseline'
+                'semanticBaseline', 'coherent-company-policy-baseline'
               )
          FROM dataset_imports
         WHERE company_id = $2 AND id = $3
@@ -325,7 +329,8 @@ async function verifyProductWorkspace(companyId: string): Promise<void> {
     || row.employees < NYC_IMPORT_COUNT
     || row.imported_records !== NYC_IMPORT_COUNT
     || row.imported_version_ones !== NYC_IMPORT_COUNT
-    || row.categories < 6 || row.policies < 48 || row.rules < CERTIFIED_RULE_COUNT || row.groups < 8
+    || row.categories < certifiedCategoryDefinitions.length || row.policies === 0
+    || row.rules < CERTIFIED_RULE_COUNT || row.groups < CERTIFIED_GROUP_COUNT
     || row.dead_jobs !== 0 || row.baseline_fingerprint === null
     || row.baseline_rule_seed !== CERTIFIED_RULE_SEED || row.baseline_rule_count !== CERTIFIED_RULE_COUNT) {
     throw new Error(`${PRODUCT_WORKSPACE_NAME} exists but its certified product baseline is incomplete`);
@@ -366,6 +371,10 @@ try {
   } else if (existing === null) {
     if (source === null) throw new Error('NYC source import was not loaded');
     companyId = await createProductWorkspace(source);
+  } else if (rebuildBaseline) {
+    if (source === null) throw new Error('NYC source import was not loaded');
+    process.stdout.write('Replacing the editable product workspace with the shared coherent baseline from its immutable imported facts.\n');
+    companyId = await createProductWorkspace(source, existing.company_id);
   } else {
     if (source === null) throw new Error('NYC source import was not loaded');
     if (existing.source_company_id !== existing.company_id
@@ -377,13 +386,16 @@ try {
   await verifyProductWorkspace(companyId);
   const jobs = await drainProductJobs(companyId);
   await verifyProductWorkspace(companyId);
-  const assignments = await pool.query<{ count: number }>(
-    'SELECT count(*)::int AS count FROM materialized_assignments WHERE company_id = $1', [companyId],
+  const assignments = await pool.query<{ count: number; policies: number }>(
+    `SELECT count(*)::int AS count,
+            (SELECT count(*)::int FROM policies WHERE company_id = $1) AS policies
+       FROM materialized_assignments WHERE company_id = $1`, [companyId],
   );
   if ((assignments.rows[0]?.count ?? 0) === 0) throw new Error('Product workspace has no materialized policy assignments');
   process.stdout.write(
     `${PRODUCT_WORKSPACE_NAME} ready (${companyId}): ${NYC_IMPORT_COUNT.toLocaleString()} imported NYC employee facts, `
-    + `6 categories, 48 policies, ${CERTIFIED_RULE_COUNT} certified-baseline rules, ${jobs} reconciliation jobs processed.\n`,
+    + `${certifiedCategoryDefinitions.length} categories, ${assignments.rows[0]!.policies} policies, `
+    + `${CERTIFIED_RULE_COUNT} shared coherent rules, ${jobs} reconciliation jobs processed.\n`,
   );
 } finally {
   await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))', ['nyc-product-workspace-seed']).catch(() => undefined);

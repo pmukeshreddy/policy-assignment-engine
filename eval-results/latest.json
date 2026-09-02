@@ -9,85 +9,462 @@
   "employees": 50000,
   "rules": 300,
   "stateMutations": 100000,
-  "batchesVerified": 227,
-  "oracleComparisons": 8675538,
-  "configuration": {
-    "localizedBatchSize": 500,
-    "workerConcurrency": 12
+  "headlineMetrics": {
+    "assignmentCorrectness": {
+      "assignmentSetDivergences": 0,
+      "totalAssignmentSetComparisons": 8669892,
+      "passed": true,
+      "correctnessGates": {
+        "assignmentSetDivergences": 0,
+        "impactMissesCausingAssignmentDivergence": 0,
+        "cardinalityViolations": 0,
+        "determinismFailures": 0,
+        "idempotencyFailures": 0,
+        "tenantIsolationFailures": 0,
+        "duplicateActiveAssignments": 0
+      }
+    },
+    "businessTransitionConformance": {
+      "passedExpectedTransitions": 103,
+      "totalExpectedTransitions": 103,
+      "byField": {
+        "location": {
+          "passed": 6,
+          "total": 6,
+          "failures": []
+        },
+        "department": {
+          "passed": 44,
+          "total": 44,
+          "failures": []
+        },
+        "employmentType": {
+          "passed": 4,
+          "total": 4,
+          "failures": []
+        },
+        "jobTitle": {
+          "passed": 37,
+          "total": 37,
+          "failures": []
+        },
+        "tenure": {
+          "passed": 4,
+          "total": 4,
+          "failures": []
+        },
+        "groupMembership": {
+          "passed": 8,
+          "total": 8,
+          "failures": []
+        }
+      },
+      "passed": true,
+      "mutationOutcomes": {
+        "location": {
+          "addOnly": 1,
+          "removeOnly": 7,
+          "replacement": 16666,
+          "unchanged": 0
+        },
+        "department": {
+          "addOnly": 3,
+          "removeOnly": 176,
+          "replacement": 16064,
+          "unchanged": 44
+        },
+        "employmentType": {
+          "addOnly": 6,
+          "removeOnly": 42,
+          "replacement": 10971,
+          "unchanged": 7
+        },
+        "jobTitle": {
+          "addOnly": 231,
+          "removeOnly": 1006,
+          "replacement": 9607,
+          "unchanged": 391
+        },
+        "tenure": {
+          "addOnly": 0,
+          "removeOnly": 0,
+          "replacement": 41,
+          "unchanged": 5551
+        },
+        "groupMembership": {
+          "addOnly": 12646,
+          "removeOnly": 2200,
+          "replacement": 1,
+          "unchanged": 1863
+        }
+      }
+    },
+    "localizedEndToEndConvergenceLatency": {
+      "overall": {
+        "samples": 99964,
+        "p50Ms": 60575.619,
+        "p95Ms": 85304.018,
+        "p99Ms": 96739.207
+      },
+      "byMutationClass": {
+        "employeeFact": {
+          "samples": 60814,
+          "p50Ms": 60655.483,
+          "p95Ms": 85313.749,
+          "p99Ms": 96690.577
+        },
+        "groupMembership": {
+          "samples": 16710,
+          "p50Ms": 60522.202,
+          "p95Ms": 85598.555,
+          "p99Ms": 96837.142
+        },
+        "manualOverride": {
+          "samples": 22440,
+          "p50Ms": 60401.4,
+          "p95Ms": 85018.372,
+          "p99Ms": 96743.811
+        }
+      }
+    },
+    "populationFanOutCompletion": {
+      "broadestChange": {
+        "mutationIndex": 95000,
+        "mutationKind": "rule_condition_edit",
+        "affectedEmployees": 50000,
+        "affectedScopes": 50000,
+        "completionMs": 243834.926,
+        "scopesPerSecond": 205.057
+      },
+      "changes": [
+        {
+          "mutationIndex": 9,
+          "mutationKind": "date_advance",
+          "affectedEmployees": 565,
+          "affectedScopes": 1130,
+          "completionMs": 69564.207,
+          "scopesPerSecond": 16.244
+        },
+        {
+          "mutationIndex": 10,
+          "mutationKind": "rule_create",
+          "affectedEmployees": 42875,
+          "affectedScopes": 42875,
+          "completionMs": 48102.817,
+          "scopesPerSecond": 891.32
+        },
+        {
+          "mutationIndex": 11,
+          "mutationKind": "rule_condition_edit",
+          "affectedEmployees": 4823,
+          "affectedScopes": 4823,
+          "completionMs": 6179.604,
+          "scopesPerSecond": 780.471
+        },
+        {
+          "mutationIndex": 12,
+          "mutationKind": "rule_enable_toggle",
+          "affectedEmployees": 8246,
+          "affectedScopes": 8246,
+          "completionMs": 28807.356,
+          "scopesPerSecond": 286.246
+        },
+        {
+          "mutationIndex": 13,
+          "mutationKind": "rule_priority_change",
+          "affectedEmployees": 334,
+          "affectedScopes": 334,
+          "completionMs": 2638.528,
+          "scopesPerSecond": 126.586
+        },
+        {
+          "mutationIndex": 14,
+          "mutationKind": "rule_effective_date_change",
+          "affectedEmployees": 297,
+          "affectedScopes": 297,
+          "completionMs": 558.931,
+          "scopesPerSecond": 531.372
+        },
+        {
+          "mutationIndex": 15,
+          "mutationKind": "policy_enable_toggle",
+          "affectedEmployees": 223,
+          "affectedScopes": 223,
+          "completionMs": 3684.122,
+          "scopesPerSecond": 60.53
+        },
+        {
+          "mutationIndex": 5000,
+          "mutationKind": "rule_condition_edit",
+          "affectedEmployees": 1930,
+          "affectedScopes": 1930,
+          "completionMs": 5395.728,
+          "scopesPerSecond": 357.69
+        },
+        {
+          "mutationIndex": 10000,
+          "mutationKind": "rule_enable_toggle",
+          "affectedEmployees": 539,
+          "affectedScopes": 539,
+          "completionMs": 2422.757,
+          "scopesPerSecond": 222.474
+        },
+        {
+          "mutationIndex": 15000,
+          "mutationKind": "rule_priority_change",
+          "affectedEmployees": 2321,
+          "affectedScopes": 2321,
+          "completionMs": 5919.245,
+          "scopesPerSecond": 392.111
+        },
+        {
+          "mutationIndex": 20000,
+          "mutationKind": "rule_effective_date_change",
+          "affectedEmployees": 32685,
+          "affectedScopes": 32685,
+          "completionMs": 41155.988,
+          "scopesPerSecond": 794.174
+        },
+        {
+          "mutationIndex": 25000,
+          "mutationKind": "policy_enable_toggle",
+          "affectedEmployees": 84,
+          "affectedScopes": 84,
+          "completionMs": 1136.927,
+          "scopesPerSecond": 73.883
+        },
+        {
+          "mutationIndex": 30000,
+          "mutationKind": "rule_create",
+          "affectedEmployees": 2632,
+          "affectedScopes": 2632,
+          "completionMs": 10675.405,
+          "scopesPerSecond": 246.548
+        },
+        {
+          "mutationIndex": 35000,
+          "mutationKind": "rule_condition_edit",
+          "affectedEmployees": 1595,
+          "affectedScopes": 1595,
+          "completionMs": 3176.607,
+          "scopesPerSecond": 502.108
+        },
+        {
+          "mutationIndex": 40000,
+          "mutationKind": "rule_enable_toggle",
+          "affectedEmployees": 1775,
+          "affectedScopes": 1775,
+          "completionMs": 7500.309,
+          "scopesPerSecond": 236.657
+        },
+        {
+          "mutationIndex": 45000,
+          "mutationKind": "rule_priority_change",
+          "affectedEmployees": 1777,
+          "affectedScopes": 1777,
+          "completionMs": 2624.417,
+          "scopesPerSecond": 677.103
+        },
+        {
+          "mutationIndex": 50000,
+          "mutationKind": "rule_effective_date_change",
+          "affectedEmployees": 408,
+          "affectedScopes": 408,
+          "completionMs": 3163.227,
+          "scopesPerSecond": 128.982
+        },
+        {
+          "mutationIndex": 55000,
+          "mutationKind": "policy_enable_toggle",
+          "affectedEmployees": 1600,
+          "affectedScopes": 1600,
+          "completionMs": 10767.509,
+          "scopesPerSecond": 148.595
+        },
+        {
+          "mutationIndex": 60000,
+          "mutationKind": "rule_create",
+          "affectedEmployees": 3194,
+          "affectedScopes": 3194,
+          "completionMs": 7235.919,
+          "scopesPerSecond": 441.409
+        },
+        {
+          "mutationIndex": 65000,
+          "mutationKind": "rule_condition_edit",
+          "affectedEmployees": 6942,
+          "affectedScopes": 6942,
+          "completionMs": 34264.938,
+          "scopesPerSecond": 202.598
+        },
+        {
+          "mutationIndex": 70000,
+          "mutationKind": "rule_enable_toggle",
+          "affectedEmployees": 32874,
+          "affectedScopes": 32874,
+          "completionMs": 119493.717,
+          "scopesPerSecond": 275.111
+        },
+        {
+          "mutationIndex": 75000,
+          "mutationKind": "rule_priority_change",
+          "affectedEmployees": 37314,
+          "affectedScopes": 37314,
+          "completionMs": 56062.305,
+          "scopesPerSecond": 665.581
+        },
+        {
+          "mutationIndex": 80000,
+          "mutationKind": "rule_effective_date_change",
+          "affectedEmployees": 255,
+          "affectedScopes": 255,
+          "completionMs": 1555.439,
+          "scopesPerSecond": 163.941
+        },
+        {
+          "mutationIndex": 85000,
+          "mutationKind": "policy_enable_toggle",
+          "affectedEmployees": 313,
+          "affectedScopes": 313,
+          "completionMs": 6974.037,
+          "scopesPerSecond": 44.881
+        },
+        {
+          "mutationIndex": 90000,
+          "mutationKind": "rule_create",
+          "affectedEmployees": 4644,
+          "affectedScopes": 4644,
+          "completionMs": 17157.137,
+          "scopesPerSecond": 270.675
+        },
+        {
+          "mutationIndex": 95000,
+          "mutationKind": "rule_condition_edit",
+          "affectedEmployees": 50000,
+          "affectedScopes": 50000,
+          "completionMs": 243834.926,
+          "scopesPerSecond": 205.057
+        }
+      ]
+    },
+    "ruleEvaluationWorkAvoided": {
+      "overall": {
+        "incrementalRuleEvaluations": 30480640,
+        "equivalentFullRecomputeRuleEvaluations": 103030324,
+        "workAvoidedPercent": 70.416
+      },
+      "byMutationClass": {
+        "employeeFact": {
+          "incrementalRuleEvaluations": 16110691,
+          "equivalentFullRecomputeRuleEvaluations": 18381059,
+          "workAvoidedPercent": 12.352
+        },
+        "groupMembership": {
+          "incrementalRuleEvaluations": 1047050,
+          "equivalentFullRecomputeRuleEvaluations": 5049746,
+          "workAvoidedPercent": 79.265
+        },
+        "manualOverride": {
+          "incrementalRuleEvaluations": 1130162,
+          "equivalentFullRecomputeRuleEvaluations": 6781336,
+          "workAvoidedPercent": 83.334
+        },
+        "ruleChange": {
+          "incrementalRuleEvaluations": 12025237,
+          "equivalentFullRecomputeRuleEvaluations": 71808737,
+          "workAvoidedPercent": 83.254
+        },
+        "policyChange": {
+          "incrementalRuleEvaluations": 111000,
+          "equivalentFullRecomputeRuleEvaluations": 670446,
+          "workAvoidedPercent": 83.444
+        },
+        "temporal": {
+          "incrementalRuleEvaluations": 56500,
+          "equivalentFullRecomputeRuleEvaluations": 339000,
+          "workAvoidedPercent": 83.333
+        },
+        "duplicateDelivery": {
+          "incrementalRuleEvaluations": 0,
+          "equivalentFullRecomputeRuleEvaluations": 0,
+          "workAvoidedPercent": 0
+        },
+        "other": {
+          "incrementalRuleEvaluations": 0,
+          "equivalentFullRecomputeRuleEvaluations": 0,
+          "workAvoidedPercent": 0
+        }
+      }
+    }
   },
-  "invariants": {
-    "assignmentMismatches": 0,
-    "impactFalseNegatives": 0,
-    "cardinalityViolations": 0,
-    "determinismFailures": 0,
-    "idempotencyFailures": 0,
-    "tenantIsolationFailures": 0,
-    "duplicateActiveAssignments": 0
-  },
-  "performance": {
-    "reconciliationP50Ms": 46.199,
-    "reconciliationP95Ms": 582.728,
-    "reconciliationP99Ms": 733.56,
-    "averageRulesEvaluatedPerMutation": 335.505,
-    "incrementalRulesEvaluated": 33550536,
-    "fullRecomputeRulesEvaluated": 421438330,
-    "ruleEvaluationWorkAvoidedPercent": 92.039,
-    "reconciliationJobs": 101269,
+  "debug": {
+    "batchesVerified": 127,
+    "oracleComparisons": 8669892,
+    "localizedBatchSize": 1000,
+    "workerConcurrency": 16,
+    "reconciliationP50Ms": 920.453,
+    "reconciliationP95Ms": 1968.538,
+    "reconciliationP99Ms": 3114.095,
+    "averageRulesEvaluatedPerMutation": 304.806,
+    "incrementalRulesEvaluated": 30480640,
+    "fullRecomputeRulesEvaluated": 421154018,
+    "ruleEvaluationWorkAvoidedPercent": 92.763,
+    "reconciliationJobs": 101129,
     "reconciliationJobsByScope": {
       "EMPLOYEE": 60824,
       "OVERRIDE": 22440,
       "GROUP": 16710,
-      "TEMPORAL": 1270,
+      "TEMPORAL": 1130,
       "RULE": 21,
       "POLICY": 4
     },
-    "jobThroughputPerSecond": 47.932,
-    "localizedMutationThroughputPerSecond": 45.784,
-    "affectedScopesPerSecond": 316.76,
-    "largePopulationChangeP50Ms": 4798.972,
-    "largePopulationChangeP95Ms": 41806.405,
-    "largePopulationChangeMaxMs": 96195.484,
-    "largeRuleChangeP50Ms": 4812.172,
-    "largeRuleChangeP95Ms": 36629.193,
-    "largeRuleChangeMaxMs": 96195.484,
-    "temporalTransitionMs": 3817.65,
-    "mutationRuntimeMs": 2779813.597,
-    "totalRuntimeMs": 3251560.216
+    "jobThroughputPerSecond": 16.888,
+    "localizedMutationThroughputPerSecond": 13.409,
+    "affectedScopesPerSecond": 100.912,
+    "largePopulationChangeP50Ms": 7127.002,
+    "largePopulationChangeP95Ms": 119610.258,
+    "largePopulationChangeMaxMs": 244335.953,
+    "largeRuleChangeP50Ms": 7332.172,
+    "largeRuleChangeP95Ms": 119610.258,
+    "largeRuleChangeMaxMs": 244335.953,
+    "temporalTransitionMs": 69570.168,
+    "mutationRuntimeMs": 8601275.262,
+    "totalRuntimeMs": 9000352.478
   },
   "baseline": {
     "reconciliationJobs": 1,
     "scopesReconciled": 300000,
-    "durationMs": 276676.898
+    "durationMs": 376251.29375
   },
   "workerCalibration": {
-    "selectedConcurrency": 12,
+    "selectedConcurrency": 16,
     "candidates": [
       {
         "concurrency": 8,
         "jobs": 240,
-        "scopes": 480,
-        "durationMs": 746.103,
-        "scopesPerSecond": 643.343
+        "scopes": 1440,
+        "durationMs": 2202.944,
+        "scopesPerSecond": 653.671
       },
       {
         "concurrency": 12,
         "jobs": 240,
-        "scopes": 480,
-        "durationMs": 505.233,
-        "scopesPerSecond": 950.057
+        "scopes": 1440,
+        "durationMs": 1134.112,
+        "scopesPerSecond": 1269.716
       },
       {
         "concurrency": 16,
         "jobs": 240,
-        "scopes": 480,
-        "durationMs": 559.373,
-        "scopesPerSecond": 858.103
+        "scopes": 1440,
+        "durationMs": 1055.618,
+        "scopesPerSecond": 1364.13
       }
     ]
   },
   "artifacts": {
-    "json": "eval-results/latest.json",
-    "markdown": "eval-results/latest.md",
-    "batches": "eval-results/batches-seed-482901.jsonl"
+    "json": "/Users/mukeshreddypochamreddy/Downloads/policy-assignment-engine-main/eval-results/latest.json",
+    "markdown": "/Users/mukeshreddypochamreddy/Downloads/policy-assignment-engine-main/eval-results/latest.md",
+    "batches": "/Users/mukeshreddypochamreddy/Downloads/policy-assignment-engine-main/eval-results/batches-seed-482901.jsonl"
   }
 }

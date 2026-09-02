@@ -24,17 +24,17 @@ describe('deterministic regression mutation generator', () => {
 
   it('batches only localized mutations and isolates every fan-out mutation', () => {
     const plan = generateMutationPlan({ seed: 482_901, count: 20_000, employeeCount: 50_000, targetCount: 300 });
-    const batches = buildMutationBatches(plan, 500);
+    const batches = buildMutationBatches(plan, 1_000);
     expect(batches.flatMap((batch) => batch.mutations)).toEqual(plan);
     for (const batch of batches) {
       if (batch.kind === 'GLOBAL') {
         expect(batch.mutations).toHaveLength(1);
         expect(isGlobalMutation(batch.mutations[0]!)).toBe(true);
       } else {
-        expect(batch.mutations.length).toBeLessThanOrEqual(500);
+        expect(batch.mutations.length).toBeLessThanOrEqual(1_000);
         expect(batch.mutations.every((mutation) => !isGlobalMutation(mutation))).toBe(true);
       }
     }
-    expect(batches.some((batch) => batch.kind === 'LOCALIZED' && batch.mutations.length === 500)).toBe(true);
+    expect(batches.some((batch) => batch.kind === 'LOCALIZED' && batch.mutations.length === 1_000)).toBe(true);
   });
 });

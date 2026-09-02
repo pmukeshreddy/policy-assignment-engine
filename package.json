@@ -21,6 +21,7 @@
     "seed:product": "tsx scripts/seed-product.ts",
     "seed:product:refresh-nyc": "tsx scripts/seed-product.ts --refresh-nyc",
     "seed:product:start": "node dist/scripts/seed-product.js",
+    "baseline:verify-previews": "tsx scripts/verify-baseline-previews.ts",
     "data:nyc": "tsx scripts/import-nyc.ts",
     "data:nyc:start": "node dist/scripts/import-nyc.js",
     "eval:regression": "tsx scripts/run-regression-eval.ts",

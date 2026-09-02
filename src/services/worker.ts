@@ -118,12 +118,18 @@ export class ReconciliationWorker {
     return inTransaction(this.pool, async (client) => {
       const due = await client.query<ScheduledRow>(
         `WITH selected AS (
-           SELECT id, company_id, employee_id, category_id
-             FROM scheduled_evaluations
-            WHERE processed_at IS NULL
-              AND transition_date <= $1::date
-              AND ($2::uuid IS NULL OR company_id = $2)
-            ORDER BY transition_date, id
+           SELECT scheduled.id, scheduled.company_id, scheduled.employee_id, scheduled.category_id
+             FROM scheduled_evaluations scheduled
+            WHERE scheduled.processed_at IS NULL
+              AND scheduled.transition_date <= $1::date
+              AND (
+                ($2::uuid IS NOT NULL AND scheduled.company_id = $2)
+                OR ($2::uuid IS NULL AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_tenants evaluation
+                   WHERE evaluation.company_id = scheduled.company_id
+                ))
+              )
+            ORDER BY scheduled.transition_date, scheduled.id
             FOR UPDATE SKIP LOCKED
             LIMIT $3
          )

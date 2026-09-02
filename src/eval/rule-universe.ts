@@ -3,6 +3,7 @@ import { inTransaction } from '../db.js';
 import {
   CERTIFIED_RULE_COUNT,
   CERTIFIED_RULE_SEED,
+  CERTIFIED_GROUP_COUNT,
   certifiedCategoryDefinitions,
   createCertifiedBaseline,
   type CertifiedCategory,
@@ -32,8 +33,8 @@ export async function rebuildEvaluationUniverse(
 ): Promise<EvaluationUniverse> {
   const ruleCount = input.ruleCount ?? EVALUATION_RULE_COUNT;
   const expectedEmployees = input.expectedEmployees ?? NYC_IMPORT_COUNT;
-  if (!Number.isInteger(ruleCount) || ruleCount < 200 || ruleCount > 500) {
-    throw new Error('Evaluation rule count must be between 200 and 500');
+  if (ruleCount !== EVALUATION_RULE_COUNT) {
+    throw new Error(`Evaluation uses the shared coherent ${EVALUATION_RULE_COUNT}-rule universe`);
   }
   return inTransaction(pool, async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', [
@@ -163,18 +164,20 @@ export async function resumePreparedEvaluationUniverse(
     const byKey = new Map(categoryResult.rows.map((row) => [row.key, row]));
     const categories = certifiedCategoryDefinitions.map((definition) => {
       const row = byKey.get(definition.key);
-      if (row === undefined || row.cardinality !== definition.cardinality || row.policy_ids.length !== 8) {
+      if (row === undefined || row.cardinality !== definition.cardinality || row.policy_ids.length === 0) {
         throw new Error(`Prepared evaluation category ${definition.key} is missing or invalid`);
       }
       return { id: row.id, key: row.key, cardinality: row.cardinality, policyIds: row.policy_ids };
     });
     const groups = await client.query<{ id: string }>(
       `SELECT id FROM groups
-        WHERE company_id = $1 AND slug LIKE 'eval-observed-department-%'
+        WHERE company_id = $1 AND slug LIKE 'observed-department-cohort-%'
         ORDER BY slug`,
       [companyId],
     );
-    if (groups.rows.length !== 8) throw new Error('Prepared evaluation universe must contain exactly eight observed cohort groups');
+    if (groups.rows.length !== CERTIFIED_GROUP_COUNT) {
+      throw new Error(`Prepared evaluation universe must contain exactly ${CERTIFIED_GROUP_COUNT} observed cohort groups`);
+    }
     const jobs = await client.query<{ id: string; active_jobs: number }>(
       `WITH baseline AS (
          SELECT id FROM reconciliation_jobs

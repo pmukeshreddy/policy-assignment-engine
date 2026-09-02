@@ -33,6 +33,11 @@ beforeAll(async () => {
   await app.ready();
   const company = await request('POST', '/companies', { name: `Integration ${crypto.randomUUID()}` }, false);
   companyId = company.id;
+  await pool.query(
+    `INSERT INTO evaluation_tenants (key, company_id, dataset_id)
+     VALUES ($1, $2, 'integration-suite')`,
+    [`integration-suite-${crypto.randomUUID()}`, companyId],
+  );
 });
 
 afterAll(async () => {
@@ -324,20 +329,24 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     expect(await assignmentPolicyIds(created.id, category.id)).toEqual(previewPolicyIds(createPreview, category.id));
   });
 
-  it('instantiates the one certified baseline twice with identical normalized semantics', async () => {
+  it('gives product initialization and evaluation initialization the same semantic fingerprint', async () => {
     const tenantIds: string[] = [];
+    const employeeIds = new Map<string, string[]>();
     try {
-      for (const namespace of ['parity-a', 'parity-b']) {
+      for (const namespace of ['product-initialization', 'evaluation-initialization']) {
         const company = await pool.query<{ id: string }>(
           'INSERT INTO companies (name) VALUES ($1) RETURNING id', [`Certified baseline ${namespace} ${crypto.randomUUID()}`],
         );
         const tenantId = company.rows[0]!.id;
         tenantIds.push(tenantId);
-        for (let index = 0; index < 10; index += 1) {
+        const createdEmployeeIds: string[] = [];
+        const roleWords = ['Analyst', 'Attorney', 'Clerk', 'Coordinator', 'Engineer', 'Investigator', 'Nurse', 'Planner'];
+        for (let index = 0; index < 240; index += 1) {
           const employee = await pool.query<{ id: string }>(
             'INSERT INTO employees (company_id, external_id) VALUES ($1, $2) RETURNING id',
             [tenantId, `BASELINE-${index}`],
           );
+          createdEmployeeIds.push(employee.rows[0]!.id);
           const version = await pool.query<{ id: string }>(
             `INSERT INTO employee_versions
                (company_id, employee_id, version, valid_from, display_name, location, department,
@@ -348,17 +357,22 @@ describe('PostgreSQL API, reconciliation, and history', () => {
               tenantId,
               employee.rows[0]!.id,
               `Record ${index}`,
-              `Location ${index % 3}`,
-              `Department ${index}`,
-              `Type ${index % 2}`,
+              `Location ${index % 6}`,
+              `Department ${index % 44}`,
+              `Type ${index % 4}`,
               `202${index % 5}-01-01`,
-              JSON.stringify({ job_title: `Title ${index}`, employment_status: index % 2 === 0 ? 'ACTIVE' : 'LEAVE' }),
+              JSON.stringify({
+                job_title: `${roleWords[index % roleWords.length]} Specialty ${index % 80}`,
+                employment_status: `Status ${index % 5}`,
+                pay_basis: `Type ${index % 4}`,
+              }),
             ],
           );
           await pool.query('UPDATE employees SET current_version_id = $3 WHERE company_id = $1 AND id = $2', [
             tenantId, employee.rows[0]!.id, version.rows[0]!.id,
           ]);
         }
+        employeeIds.set(namespace, createdEmployeeIds);
         await inTransaction(pool, (client) => createCertifiedBaseline(client, {
           companyId: tenantId,
           baselineDate: '2026-06-30',
@@ -368,14 +382,55 @@ describe('PostgreSQL API, reconciliation, and history', () => {
         }));
       }
       const [left, right] = await Promise.all(tenantIds.map((tenantId) => certifiedBaselineSemantics(pool, tenantId)));
-      expect(left!.counts).toEqual({ categories: 6, policies: 48, rules: 300, groups: 8 });
+      expect(left!.counts).toMatchObject({ categories: 6, rules: 300, groups: 8 });
+      expect(left!.counts.policies).toBeGreaterThan(0);
       expect(right!.counts).toEqual(left!.counts);
       expect(right!.fingerprint).toBe(left!.fingerprint);
       expect(right!.content).toEqual(left!.content);
+
+      const productTenantId = tenantIds[0]!;
+      const employeeId = employeeIds.get('product-initialization')![0]!;
+      const base = { employeeId, asOfDate: '2026-06-30' };
+      assertCategoryReplacement(
+        await previewForCompany(productTenantId, { ...base, location: 'Location 1' }),
+        'workplace-requirements', 'Location 0 Workplace Requirements', 'Location 1 Workplace Requirements',
+      );
+      assertCategoryReplacement(
+        await previewForCompany(productTenantId, { ...base, department: 'Department 1' }),
+        'department-workflow-access', 'Department 0 Workflow Access', 'Department 1 Workflow Access',
+      );
+      assertCategoryReplacement(
+        await previewForCompany(productTenantId, { ...base, employmentType: 'Type 1' }),
+        'compensation-program', 'Type 0 Compensation Program', 'Type 1 Compensation Program',
+      );
+      assertCategoryReplacement(
+        await previewForCompany(productTenantId, {
+          ...base,
+          attributes: { job_title: 'Attorney Specialty 1', employment_status: 'Status 0', pay_basis: 'Type 0' },
+        }),
+        'role-access-training', 'Analyst Role Access and Training', 'Attorney Role Access and Training',
+      );
+      assertCategoryReplacement(
+        await previewForCompany(productTenantId, { ...base, hireDate: '2025-01-01' }),
+        'tenure-benefits', 'Experienced Benefits — 5 to 10 years', 'Foundation Benefits — under 2 years',
+      );
+
+      const currentGroups = await pool.query<{ id: string }>(
+        `SELECT gm.group_id AS id FROM group_memberships gm
+          WHERE gm.company_id = $1 AND gm.employee_id = $2
+            AND gm.valid_from <= '2026-06-30'::date
+            AND (gm.valid_to IS NULL OR gm.valid_to > '2026-06-30'::date)`,
+        [productTenantId, employeeId],
+      );
+      expect(currentGroups.rows).toHaveLength(1);
+      const groupPreview = await previewForCompany(productTenantId, { ...base, groupIds: [] });
+      const cross = groupPreview.categories.find((category: { key: string }) => category.key === 'cross-functional-requirements');
+      expect(cross.before.filter((policy: { id: string }) => !cross.after.some((after: { id: string }) => after.id === policy.id)))
+        .toHaveLength(1);
     } finally {
       if (tenantIds.length > 0) await pool.query('DELETE FROM companies WHERE id = ANY($1::uuid[])', [tenantIds]);
     }
-  }, 120_000);
+  }, 180_000);
 
   it('fires a persisted tenure transition when no source record changes', async () => {
     now = new Date('2026-08-02T12:00:00Z');
@@ -422,7 +477,7 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     await pool.query('DELETE FROM companies WHERE id = $1', [other.id]);
   });
 
-  it('reserves evaluation-tenant jobs for an explicitly scoped worker', async () => {
+  it('reserves evaluation-tenant jobs and temporal schedules for an explicitly scoped worker', async () => {
     const evaluationCompany = await request('POST', '/companies', { name: `Evaluation ${crypto.randomUUID()}` }, false);
     await pool.query(
       `INSERT INTO evaluation_tenants (key, company_id, dataset_id)
@@ -441,6 +496,47 @@ describe('PostgreSQL API, reconciliation, and history', () => {
     expect(companies.data.some((company: { id: string }) => company.id === evaluationCompany.id)).toBe(false);
     const scoped = new ReconciliationWorker(pool, workerConfig, clock, evaluationCompany.id);
     expect((await scoped.processNext())?.job.id).toBe(job.rows[0]!.id);
+
+    now = new Date('2026-08-03T12:00:00Z');
+    const category = await requestForCompany(evaluationCompany.id, 'POST', '/policy-categories', {
+      key: 'evaluation-tenure', name: 'Evaluation tenure', cardinality: 'SINGLE',
+    });
+    const policy = await requestForCompany(evaluationCompany.id, 'POST', '/policies', {
+      key: 'evaluation-tenure-earned', categoryId: category.id, name: 'Evaluation tenure earned', effectiveFrom: '2026-08-03',
+    });
+    const employee = await requestForCompany(evaluationCompany.id, 'POST', '/employees', {
+      externalId: 'EVALUATION-TEMPORAL', displayName: 'Evaluation temporal employee',
+      hireDate: '2024-08-04', effectiveFrom: '2026-08-03',
+    });
+    await requestForCompany(evaluationCompany.id, 'POST', '/rules', {
+      key: 'evaluation-tenure-earned-rule', policyId: policy.id, priority: 10,
+      validFrom: '2026-08-03', publish: true,
+      condition: { type: 'comparison', fact: { kind: 'tenure_days' }, operator: 'GTE', value: 730 },
+    });
+    while (await scoped.processOne()) {
+      // Materialize the evaluation scope and persist its future transition.
+    }
+    const scheduledBefore = await pool.query<{ id: string; processed_at: Date | null }>(
+      `SELECT id, processed_at FROM scheduled_evaluations
+        WHERE company_id = $1 AND employee_id = $2 AND transition_date = '2026-08-04'`,
+      [evaluationCompany.id, employee.id],
+    );
+    expect(scheduledBefore.rows).toHaveLength(1);
+    expect(scheduledBefore.rows[0]!.processed_at).toBeNull();
+
+    now = new Date('2026-08-04T12:00:00Z');
+    await unscoped.enqueueDueTemporalJobs();
+    const afterUnscoped = await pool.query<{ processed_at: Date | null }>(
+      'SELECT processed_at FROM scheduled_evaluations WHERE id = $1',
+      [scheduledBefore.rows[0]!.id],
+    );
+    expect(afterUnscoped.rows[0]!.processed_at).toBeNull();
+    expect(await scoped.enqueueDueTemporalJobs()).toBe(1);
+    const afterScoped = await pool.query<{ processed_at: Date | null }>(
+      'SELECT processed_at FROM scheduled_evaluations WHERE id = $1',
+      [scheduledBefore.rows[0]!.id],
+    );
+    expect(afterScoped.rows[0]!.processed_at).not.toBeNull();
     await pool.query('DELETE FROM companies WHERE id = $1', [evaluationCompany.id]);
   });
 
@@ -494,6 +590,40 @@ function previewPolicyIds(preview: any, categoryId: string): string[] {
   return (preview.categories.find((category: { id: string }) => category.id === categoryId)?.after ?? [])
     .map((policy: { id: string }) => policy.id)
     .sort();
+}
+
+async function previewForCompany(tenantId: string, body: object): Promise<any> {
+  const response = await app.inject({
+    method: 'POST',
+    url: '/employees/preview',
+    headers: { 'x-company-id': tenantId },
+    payload: body,
+  });
+  if (response.statusCode >= 400) throw new Error(`POST /employees/preview: ${response.statusCode} ${response.body}`);
+  return response.json();
+}
+
+async function requestForCompany(
+  tenantId: string,
+  method: NonNullable<InjectOptions['method']>,
+  url: string,
+  body?: object,
+): Promise<any> {
+  const options: InjectOptions = { method, url, headers: { 'x-company-id': tenantId } };
+  if (body !== undefined) options.payload = body;
+  const response = await app.inject(options);
+  if (response.statusCode >= 400) throw new Error(`${method} ${url}: ${response.statusCode} ${response.body}`);
+  return response.statusCode === 204 ? null : response.json();
+}
+
+function assertCategoryReplacement(preview: any, categoryKey: string, removedName: string, addedName: string): void {
+  const category = preview.categories.find((item: { key: string }) => item.key === categoryKey);
+  const beforeIds = new Set(category.before.map((policy: { id: string }) => policy.id));
+  const afterIds = new Set(category.after.map((policy: { id: string }) => policy.id));
+  expect(category.before.filter((policy: { id: string }) => !afterIds.has(policy.id)).map((policy: { name: string }) => policy.name))
+    .toContain(removedName);
+  expect(category.after.filter((policy: { id: string }) => !beforeIds.has(policy.id)).map((policy: { name: string }) => policy.name))
+    .toContain(addedName);
 }
 
 async function assignmentPolicyIds(employeeId: string, categoryId: string): Promise<string[]> {

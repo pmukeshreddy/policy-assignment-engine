@@ -2,7 +2,7 @@
 
 A production-minded, generic policy assignment system built as a TypeScript modular monolith with PostgreSQL. It versions source data, incrementally reconciles only impacted employee/category scopes, materializes product reads, records complete decisions, schedules date transitions, and previews rule changes through the same evaluator and resolver used in production.
 
-The engine has no Warp-specific policy names or business rules. The default reviewer product is **NYC Open Data Policy Workspace**, an isolated tenant containing the same 50,000 normalized employee facts persisted by the NYC importer. Its small policy/rule set is labelled **Evaluation / demonstration policy configuration** and must not be interpreted as official NYC policy. The reviewer tenant is separate from the certified evaluation tenant, so normal UI edits cannot alter the certified evidence.
+The engine has no customer-specific logic. The default reviewer product is **NYC Open Data Policy Workspace**, an isolated tenant containing the same 50,000 normalized employee facts persisted by the NYC importer. One shared baseline builder derives a fictional, internally coherent company-policy universe from those observed facts: six domains, 146 policies for the current population, and exactly 300 normal DSL rules. Product initialization and regression evaluation use identical categories, policies, priorities, cardinalities, and conditions; only tenant-local UUIDs differ. These fictional company policies are not official NYC policies or laws.
 
 ## What is implemented
 
@@ -22,7 +22,7 @@ The engine has no Warp-specific policy names or business rules. The default revi
 - Exact rule preview through the production evaluator/resolver
 - Tenant-scoped API and a production admin application at `/admin/`
 - Unit, PostgreSQL integration, concurrency, temporal, API, and randomized oracle tests
-- Reproducible 50,000-employee NYC Open Data regression evaluation with 300 evaluation-only rules and 100,000 mutations
+- Reproducible 50,000-employee NYC Open Data regression evaluation with the shared coherent 300-rule universe and 100,000 mutations
 
 See [Architecture](docs/ARCHITECTURE.md), the [API guide](docs/API.md), and the [UX design rationale](docs/UX_DESIGN.md).
 
@@ -84,7 +84,7 @@ npm run build
 
 ## NYC Open Data regression evaluation
 
-The large regression harness uses the official [NYC Citywide Payroll Data](https://data.cityofnewyork.us/api/v3/views/k397-673e/query.json) as employee facts. It does **not** claim that its generated policy universe represents NYC policy. Policies, groups, and rules are deterministic evaluation configuration derived from observed fact distributions and are labelled `evaluationOnly` in PostgreSQL.
+The large regression harness uses the official [NYC Citywide Payroll Data](https://data.cityofnewyork.us/api/v3/views/k397-673e/query.json) as employee facts. It does **not** claim that the generated fictional company-policy universe represents NYC policy. The same data-derived baseline builder initializes both product and evaluation tenants.
 
 With PostgreSQL running and migrations applied:
 
@@ -97,47 +97,26 @@ npm run eval:regression -- --seed=482901
 
 The import records its source URL, exact SoQL query, fetch time, counts, skip reasons, dataset/fiscal-year metadata, and SHA-256 checksum in `dataset_imports`. Per-employee provenance is retained in `employee_import_records`. No downloaded JSON or imported employee records are committed to Git.
 
-`eval:regression` is offline with respect to NYC: it refuses to run unless PostgreSQL already contains the required imported population. It deterministically builds 300 evaluation-only rules and runs at least 100,000 state mutations through:
+`eval:regression` is offline with respect to NYC: it refuses to run unless PostgreSQL already contains the required imported population. It deterministically builds the shared 300-rule universe and runs at least 100,000 state mutations through:
 
 ```text
 Fastify mutation API → transactional outbox → ImpactAnalyzer → worker
 → ReconciliationService → PostgreSQL materialization → independent full oracle
 ```
 
-Every checkpoint compares exact policy IDs. The run fails immediately and writes the seed plus executed mutation prefix if assignments, impact completeness, cardinality, determinism, idempotency, duplicate protection, or tenant isolation diverge. Successful human and JSON summaries are written to `eval-results/latest.md` and `eval-results/latest.json`; the latest certified summaries are committed. Per-batch replay ledgers and failure artifacts remain ignored because they are large and machine-specific.
+Every checkpoint compares exact policy IDs. The run fails immediately and writes the seed plus executed mutation prefix if assignment sets, impact completeness, cardinality, determinism, idempotency, duplicate protection, or tenant isolation diverge. Successful human and JSON summaries are written to `eval-results/latest.md` and `eval-results/latest.json`; per-batch replay ledgers and failure artifacts remain ignored because they are large and machine-specific.
 
-The certified seed-`482901` run completed on 2026-08-31 against the imported dataset checksum `dbf4a9c0fea6ddea244a37ef5e6b21901b4fc714826f3f18666162a4cb687eaf`:
+During the long randomized phase, ordinary localized employee/group mutations are drained and oracle-verified in batches of up to 1,000. Temporal advances, rule and policy configuration changes, and every other full-population fan-out mutation remain singleton checkpoints that are drained and verified immediately. This verification batch size is independent of the worker's 500-scope reconciliation transaction bound.
 
-```text
-Employees:                              50,000
-Initial evaluation rules:                  300
-Mutations verified:                    100,000
-Validation batches:                        227
-Oracle assignment-scope comparisons: 8,675,538
+The primary report contains exactly five headline metrics:
 
-Assignment mismatches:                       0
-Impact false negatives:                      0
-SINGLE-cardinality violations:               0
-Determinism failures:                        0
-Idempotency failures:                        0
-Duplicate active assignments:                0
-Tenant-isolation failures:                   0
+1. Assignment correctness against the independent full-recompute oracle.
+2. Business-transition conformance across location, department, compensation, role, tenure, and group semantics. This is checked independently of oracle agreement.
+3. Localized end-to-end convergence latency from API commit until correct materialization is visible, with employee-fact, group, and manual-override breakdowns.
+4. Population fan-out completion time, including a measured change affecting at least 10% of the 50,000-person population.
+5. Rule-evaluation work avoided versus equivalent full recomputation, overall and by mutation class.
 
-Reconciliation p50:                  46.199 ms
-Reconciliation p95:                 582.728 ms
-Reconciliation p99:                  733.56 ms
-Localized mutation throughput:        45.784/s
-Affected-scope throughput:             316.76/s
-Large rule-change p95:             36,629.193 ms
-Temporal transition:                3,817.65 ms
-Rules actually evaluated:          33,550,536
-Equivalent full-rule evaluations: 421,438,330
-Rule-evaluation work avoided:          92.039%
-Mutation runtime:                    2,779.814 s
-Total evaluation runtime:             3,251.56 s
-```
-
-The runner measured 8, 12, and 16 workers locally and selected 12 (`643.343`, `950.057`, and `858.103` calibration scopes/second respectively). Reconciliation percentiles exclude deterministic setup, import, baseline materialization, calibration, and oracle time. The mutation runtime includes API writes, production job draining, oracle comparisons, and per-batch invariant checks. Four rule-create mutations intentionally leave 304 rules at the end; the certified starting universe contains 300.
+Cardinality, determinism, idempotency, duplicate-assignment, tenant-isolation, and impact-completeness checks are correctness gates under metric 1. Mutation add/remove/replacement/unchanged counts are diagnostic evidence under metric 2. Worker calibration, batch counts, raw evaluation counts, and total runtime remain available only in the JSON `debug` section.
 
 Useful options:
 

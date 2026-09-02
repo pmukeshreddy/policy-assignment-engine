@@ -259,7 +259,11 @@ function previewDiff(preview) {
 function employeeFactDiff(flow) {
   if (!flow.employee) return '';
   const mappings = [...(flow.employee.is_anonymized ? [] : [['displayName', 'Name', 'display_name']]), ['email', 'Email', 'email'], ['department', 'Department', 'department'], ['location', 'Location', 'location'], ['employmentType', 'Employment type', 'employment_type'], ['hireDate', 'Hire date', 'hire_date'], ['isManager', 'Manager status', 'is_manager']];
-  const rows = mappings.map(([key, label, originalKey]) => ({ label, before: flow.employee[originalKey], after: flow.values[key] })).filter((item) => String(item.before ?? '') !== String(item.after ?? ''));
+  const rows = mappings.map(([key, label, originalKey]) => ({
+    label,
+    before: key === 'hireDate' ? String(flow.employee[originalKey] || '').slice(0, 10) : flow.employee[originalKey],
+    after: key === 'hireDate' ? String(flow.values[key] || '').slice(0, 10) : flow.values[key],
+  })).filter((item) => String(item.before ?? '') !== String(item.after ?? ''));
   [['jobTitle', 'Job title', 'job_title'], ['payBasis', 'Pay basis', 'pay_basis']].forEach(([key, label, attributeKey]) => { if (String(flow.employee.attributes?.[attributeKey] ?? '') !== String(flow.values[key] ?? '')) rows.push({ label, before: flow.employee.attributes?.[attributeKey], after: flow.values[key] }); });
   const beforeGroups = new Set(flow.employee.groups.map((group) => group.id)); const groupChanged = flow.values.groupIds.length !== beforeGroups.size || flow.values.groupIds.some((id) => !beforeGroups.has(id));
   if (groupChanged) rows.push({ label: 'Group memberships', before: `${beforeGroups.size} groups`, after: `${flow.values.groupIds.length} groups` });
