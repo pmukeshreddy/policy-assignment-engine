@@ -286,11 +286,3 @@ The regression also gates cardinality, determinism, retry idempotency, duplicate
 
 Operational failures and retry counts are visible through `GET /reconciliation/jobs`. `npm run db:reset` refuses production databases and, unless `ALLOW_DATABASE_RESET=true`, accepts only database names ending in `_test`.
 
-## Documentation and walkthrough
-
-- **Video walkthrough:** <https://www.loom.com/share/a424face036a4d1989bd9baeb657ffe0>
-- **Database / ERD:** <https://dbdiagram.io/d/6a98e60f5450bea1bed60889>
-- **Implementation architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- **API guide:** [docs/API.md](docs/API.md)
-- **Admin UX rationale:** [docs/UX_DESIGN.md](docs/UX_DESIGN.md)
-- **Design report:** PDF supplied separately with the take-home submission; no PDF file or public report URL is present in this repository.
