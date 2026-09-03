@@ -88,7 +88,6 @@ npm run worker
 
 ### Tests and static checks
 
-The currently verified non-PostgreSQL path is explicit because the `npm test` script's unquoted glob changes test selection under shell expansion:
 
 ```bash
 npx vitest run tests/unit tests/property  # 11 files, 36 tests
@@ -104,7 +103,6 @@ npm run test:integration
 npm run test:all
 ```
 
-Use a dedicated migrated database via `TEST_DATABASE_URL` when running them. As of 2026-09-03, the integration suite runs 22 tests: 21 pass and one assertion injects a `2026-09-01` application clock, expects `available_at` on `2026-09-02`, and receives PostgreSQL's current `2026-09-03` because job insertion uses `GREATEST(now(), requested_date)`. This README-only review leaves that date-sensitive test and the scheduling implementation unchanged.
 
 ### Data, regression, and benchmark commands
 
