@@ -29,7 +29,7 @@
     "data:nyc:backfill-names:start": "node dist/scripts/backfill-nyc-names.js",
     "eval:regression": "tsx scripts/run-regression-eval.ts",
     "eval:regression:start": "node dist/scripts/run-regression-eval.js",
-    "test": "vitest run --exclude tests/integration/**",
+    "test": "vitest run tests/unit tests/property",
     "test:watch": "vitest",
     "test:integration": "vitest run tests/integration --pool=forks --poolOptions.forks.singleFork=true",
     "test:all": "vitest run --pool=forks --poolOptions.forks.singleFork=true",
