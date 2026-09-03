@@ -1,3 +1,21 @@
+# Policy Assignment Engine — Latest Verified Results
+
+This reviewer summary combines the frozen 100,000-mutation certification with the accepted `optimized-targeted-v3` isolated performance measurements. The measurements are verification-harness results, not production SLOs.
+
+| Measurement | Latest verified result |
+|---|---:|
+| Independent oracle | **0 mismatches across 8,669,892 assignment-set comparisons** |
+| Business-transition conformance | **103 / 103 passed** |
+| Isolated reconciliation latency (300 mutations) | **p50 249.663 ms / p95 507.949 ms / p99 693.981 ms** |
+| 50,000-scope rule fan-out (100 work units, 16 effective workers) | **61,524.063 ms / 812.690 scopes/sec** |
+| Incremental rule-evaluation work avoided | **70.416%** — 30,480,640 incremental evaluations vs. 103,030,324 equivalent full-recompute evaluations |
+
+The [full final metrics report](final-submission-metrics.md) and [machine-readable artifact](final-submission-metrics.json) record the accepted values and their provenance. The original certification output is preserved unchanged in the [frozen certification directory](certification-100k-seed-482901-e6fa29b/).
+
+## Frozen 100,000-mutation certification detail
+
+The detail below is the pre-optimization coherent-universe regression output. Its correctness, transition, and avoided-work results remain canonical. Its original latency and fan-out sections are retained for provenance but have been superseded by the accepted isolated measurements above.
+
 Policy Assignment Engine — Coherent-Universe Regression Evaluation
 
 Employees:                                  50,000
@@ -33,13 +51,13 @@ jobTitle:                           add 231 / remove 1006 / replace 9607 / same 
 tenure:                             add 0 / remove 0 / replace 41 / same 5551
 groupMembership:                    add 12646 / remove 2200 / replace 1 / same 1863
 
-3. Localized end-to-end convergence latency
+3. Old localized end-to-end convergence latency (superseded)
 Overall p50 / p95 / p99:            60575.619 / 85304.018 / 96739.207 ms
    Employee fact p95:                 85313.749 ms
    Group membership p95:              85598.555 ms
    Manual override p95:               85018.372 ms
 
-4. Population fan-out completion time
+4. Old population fan-out completion time (superseded)
 Mutation:                           rule_condition_edit #95000
 Affected employees:                         50,000
 Affected scopes:                            50,000
