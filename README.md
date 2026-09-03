@@ -22,6 +22,23 @@ Temporal transitions are scheduled rather than discovered by population-wide swe
 | Product surface | Tenant-scoped JSON API, server-backed rule/employee/manual-control previews, assignment/explanation endpoints, and a static admin application at `/admin/` |
 | Verification | Unit/property tests, PostgreSQL integration tests, a 50,000-employee/100,000-mutation independent-oracle regression, and an isolated latency/fan-out benchmark |
 
+### Where the code lives
+
+For the main execution path, follow [API source writes](src/api/app.ts) → [durable jobs](src/services/jobs.ts) → [worker processing](src/services/worker.ts) → [impact analysis](src/services/impact.ts) → [reconciliation](src/services/reconciliation.ts) → [evaluation](src/services/evaluation.ts) → [deterministic resolution](src/domain/resolution.ts). `reconciliation.ts` is the central desired-vs-current loop: it evaluates an affected employee/category scope, persists decision evidence, applies the assignment diff, updates history, and schedules the next transition.
+
+| Review area | Primary files |
+|---|---|
+| Process entry points | [API server](src/server.ts), [background worker](src/worker-main.ts) |
+| HTTP API and validation | [routes](src/api/app.ts), [request schemas](src/api/schemas.ts), [route helpers](src/api/helpers.ts) |
+| Rule AST and compiler | [rules.ts](src/domain/rules.ts) |
+| Evaluation and precedence | [evaluation.ts](src/services/evaluation.ts), [resolution.ts](src/domain/resolution.ts) |
+| Incremental impact and reconciliation | [impact.ts](src/services/impact.ts), [reconciliation.ts](src/services/reconciliation.ts) |
+| Durable job lifecycle | [jobs.ts](src/services/jobs.ts), [worker.ts](src/services/worker.ts) |
+| Persistence and database model | [repository.ts](src/services/repository.ts), [base schema](migrations/0001_initial.sql), [subsequent migrations](migrations/) |
+| Admin UI | [index.html](public/index.html), [app.js](public/app.js), [styles.css](public/styles.css) |
+| NYC workspace and generated policy universe | [NYC importer](scripts/import-nyc.ts), [product seed](scripts/seed-product.ts), [universe generator](src/baseline/coherent-universe.ts) |
+| Verification harness | [independent oracle](src/eval/oracle.ts), [regression runner](src/eval/regression.ts), [performance benchmark](scripts/benchmark-production-performance.ts), [tests](tests/) |
+
 The implementation does **not** include authentication/authorization, a dedicated message broker, distributed caches, or partitioned decision-history tables. `X-Company-Id` enforces data scoping but is not identity proof. Those are deployment or future-scaling concerns, not features claimed by this repository. An explicit full-company reconciliation endpoint exists for initialization, repair, and backfill; it is not the normal mutation path.
 
 ## Reviewer quick start
@@ -285,4 +302,3 @@ The regression also gates cardinality, determinism, retry idempotency, duplicate
 - **Calendar-day semantics:** the model resolves one final state per UTC date rather than intraday effective timestamps.
 
 Operational failures and retry counts are visible through `GET /reconciliation/jobs`. `npm run db:reset` refuses production databases and, unless `ALLOW_DATABASE_RESET=true`, accepts only database names ending in `_test`.
-
