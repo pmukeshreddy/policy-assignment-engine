@@ -1,137 +1,116 @@
 # Policy Assignment Engine
 
-A production-minded, generic policy assignment system built as a TypeScript modular monolith with PostgreSQL. It versions source data, incrementally reconciles only impacted employee/category scopes, materializes product reads, records complete decisions, schedules date transitions, and previews rule changes through the same evaluator and resolver used in production.
+## Project overview
 
-The engine has no customer-specific logic. The default reviewer product is **NYC Open Data Policy Workspace**, an isolated tenant containing the same 50,000 normalized employee facts persisted by the NYC importer. One shared baseline builder derives a fictional, internally coherent company-policy universe from those observed facts: six domains, 146 policies for the current population, and exactly 300 normal DSL rules. Product initialization and regression evaluation use identical categories, policies, priorities, cardinalities, and conditions; only tenant-local UUIDs differ. These fictional company policies are not official NYC policies or laws.
+The Policy Assignment Engine turns continuously changing employee and company state into deterministic, effective-dated policy assignments. Employee facts, group memberships, policy and rule versions, manual controls, and calendar boundaries are written as source state; PostgreSQL-backed reconciliation jobs reduce each change to the affected `(employee, policy category)` scopes and converge those scopes independently.
 
-## What is implemented
+The core is a structured rule AST/compiler, dependency-driven impact analysis, deterministic `SINGLE`/`MULTIPLE` conflict resolution, and desired-vs-current minimal-diff reconciliation. Current assignments are materialized for reads while dated source versions, assignment history, decision snapshots, matched candidates, condition traces, and rejection reasons preserve the evidence behind each result.
 
-- Arbitrary employee attributes plus versioned core employee facts
-- Effective-dated groups and memberships
-- `SINGLE` and `MULTIPLE` policy categories
-- Immutable policy and rule versions
-- Validated rule AST: `AND`, `OR`, `NOT`, equality/ordering/`IN`, arbitrary attributes, groups, calendar dates, and tenure
-- Cached compiled rules and persisted dependency/selector metadata
-- Deterministic precedence: manual controls, priority, specificity, stable ID
-- Manual `ASSIGN` and `EXCLUDE` controls
-- Transactional PostgreSQL outbox/jobs with leases, heartbeats, retries, dead-letter state, and `SKIP LOCKED`
-- Dependency-aware employee impact and sound mandatory-selector rule impact
-- Exact date/tenure transition scheduling
-- Serialized, idempotent assignment diffing and materialized current reads
-- Effective-dated assignment history and first-class explanation records
-- Exact rule preview through the production evaluator/resolver
-- Tenant-scoped API and a production admin application at `/admin/`
-- Unit, PostgreSQL integration, concurrency, temporal, API, and randomized oracle tests
-- Reproducible 50,000-employee NYC Open Data regression evaluation with the shared coherent 300-rule universe and 100,000 mutations
+Temporal transitions are scheduled rather than discovered by population-wide sweeps. Transactional job creation, dedupe keys, leases, ordered advisory locks, decision fingerprints, and retries provide idempotency and failure recovery; terminal `DEAD` state exposes jobs that exhaust retry attempts. The repository packages the engine as a TypeScript modular monolith with a Fastify API/admin UI, a background worker, PostgreSQL, an NYC Open Data evaluation workspace, and independent-oracle verification. The separately submitted PDF contains the deeper design argument; this README is the implementation and reviewer guide.
 
-See [Architecture](docs/ARCHITECTURE.md), the [API guide](docs/API.md), and the [UX design rationale](docs/UX_DESIGN.md).
+## What is actually implemented
 
-## Quick start with Docker
+| Area | Implementation |
+|---|---|
+| Source state | Company-scoped employees with effective-dated versions and arbitrary attributes; dated group memberships, policy versions, published rule windows, and manual `ASSIGN`/`EXCLUDE` controls |
+| Rules | Zod-validated recursive AST, compilation cache, SHA-256 content hash, specificity, dependencies, safe mandatory selectors, evaluation traces, and exact backend previews |
+| Impact | Changed employee keys map to dependent categories; group changes map through exact group dependencies; rule changes union old/new selector populations; policy changes include current assignees and candidate populations; overrides and temporal events target one employee/category |
+| Resolution | Candidate generation is separate from stable precedence and `SINGLE`/`MULTIPLE` cardinality enforcement |
+| Reconciliation | Per-scope advisory locking, input-fingerprint decision reuse, desired-vs-current inserts/deletes only, materialized current state, effective-dated assignment history, and scheduled transitions |
+| Jobs and recovery | Source mutation plus job insertion in one SQL transaction; `SKIP LOCKED` claims, leases/heartbeats, exponential retry, dedupe keys, error retention, and terminal `DEAD` jobs |
+| Broad rule changes | Rule impacts over 500 scopes become durable 500-scope child jobs that can be claimed by multiple workers; the parent completes only after every child succeeds |
+| Product surface | Tenant-scoped JSON API, server-backed rule/employee/manual-control previews, assignment/explanation endpoints, and a static admin application at `/admin/` |
+| Verification | Unit/property tests, PostgreSQL integration tests, a 50,000-employee/100,000-mutation independent-oracle regression, and an isolated latency/fan-out benchmark |
 
-Prerequisites: Docker Desktop with Compose.
+The implementation does **not** include authentication/authorization, a dedicated message broker, distributed caches, or partitioned decision-history tables. `X-Company-Id` enforces data scoping but is not identity proof. Those are deployment or future-scaling concerns, not features claimed by this repository. An explicit full-company reconciliation endpoint exists for initialization, repair, and backfill; it is not the normal mutation path.
+
+## Reviewer quick start
+
+### Docker: shortest path to the reviewer workspace
+
+Prerequisite: Docker Desktop with Compose. The first startup needs a one-time network import because imported employee data is not committed.
 
 ```bash
 cp .env.example .env
-docker compose up --build
-```
-
-The persisted PostgreSQL volume must already contain the 50,000-row NYC import. If it does not, run the importer once before starting the full stack. The reviewer seed never calls the NYC API:
-
-```bash
+docker compose build
+docker compose up -d postgres
 docker compose run --rm migrate
 docker compose run --rm migrate npm run data:nyc:start
-docker compose up --build
+docker compose up
 ```
 
-Open <http://localhost:3000/admin/>. **NYC Open Data Policy Workspace** is the default; the API health endpoint is <http://localhost:3000/health>.
+The final command runs migrations and the idempotent product seed before starting the API and worker. Open <http://localhost:3000/admin/> and select **NYC Open Data Policy Workspace**. The database-backed health check is <http://localhost:3000/health>. On later starts, while the `policy-postgres` volume still contains the import, `docker compose up --build` is sufficient.
 
-The focused product journey is: Policies (what can be assigned) → Rules (who receives them) → Employees (which facts matched) → Why (how the winner was selected) → edit impact (what changes before saving) → Audit (what happened and why). Categories live inside Policies and manual overrides live on Employee detail. Employee and rule previews call backend services that use the production evaluator/resolver—there is no browser-side rule engine.
+A useful five-minute review path is:
 
-PostgreSQL data persists in the `policy-postgres` volume. Compose runs migrations and the idempotent product seed before the API and background worker start. Seeding copies persisted `employee_import_records` set-wise into an isolated editable tenant and does not perform a network request.
+```text
+Policies → Rules → Employees → Why? → preview an employee/rule edit → Audit
+```
 
-## Local development
+Employee and rule previews call backend services using the same evaluator and resolver as reconciliation; there is no browser-side rule engine.
 
-Prerequisites: Node.js 22+ and PostgreSQL 16+ (or only PostgreSQL through Compose).
+### Local development
+
+Prerequisites: Node.js 22+ and PostgreSQL 16+; Compose can provide PostgreSQL.
 
 ```bash
-docker compose up -d postgres
-npm ci
 cp .env.example .env
+npm ci
+docker compose up -d postgres
 npm run db:migrate
-npm run data:nyc       # once, only when PostgreSQL does not already contain the import
-npm run seed:product   # offline product tenant from persisted import facts + the certified baseline
+npm run data:nyc       # once per empty database; performs the network fetch
+npm run seed:product   # offline copy + generated policy universe + initial reconciliation
 npm run dev
 ```
 
-Run the worker in a second terminal:
+Run the worker in a second terminal so subsequent mutations reconcile:
 
 ```bash
 npm run worker
 ```
 
-Useful commands:
+### Tests and static checks
+
+The currently verified non-PostgreSQL path is explicit because the `npm test` script's unquoted glob changes test selection under shell expansion:
 
 ```bash
+npx vitest run tests/unit tests/property  # 11 files, 36 tests
 npm run typecheck
 npm run lint
-npm test                 # unit + 100-scenario randomized harness
-npm run test:integration # PostgreSQL/API suite
-npm run test:all         # every test, PostgreSQL must be available
 npm run build
 ```
 
-`npm run db:reset` refuses production databases. It only accepts a database ending in `_test`, unless `ALLOW_DATABASE_RESET=true` is set explicitly.
+The repository's full database commands are:
 
-## NYC Open Data regression evaluation
+```bash
+npm run test:integration
+npm run test:all
+```
 
-The large regression harness uses the official [NYC Citywide Payroll Data](https://data.cityofnewyork.us/api/v3/views/k397-673e/query.json) as employee facts. It does **not** claim that the generated fictional company-policy universe represents NYC policy. The same data-derived baseline builder initializes both product and evaluation tenants.
+Use a dedicated migrated database via `TEST_DATABASE_URL` when running them. As of 2026-09-03, the integration suite runs 22 tests: 21 pass and one assertion injects a `2026-09-01` application clock, expects `available_at` on `2026-09-02`, and receives PostgreSQL's current `2026-09-03` because job insertion uses `GREATEST(now(), requested_date)`. This README-only review leaves that date-sensitive test and the scheduling implementation unchanged.
+
+### Data, regression, and benchmark commands
 
 With PostgreSQL running and migrations applied:
 
 ```bash
 npm run data:nyc
+npm run seed:product
 npm run eval:regression -- --seed=482901
+npm run benchmark:production-performance -- --samples-per-type=50 --label=reviewer
 ```
 
-`data:nyc` performs the network operation. It discovers the latest fiscal year, pages the Socrata endpoint, validates every row, and continues until exactly 50,000 usable records have been imported. `NYC_APP_TOKEN` is optional. Public `First Name`, `Last Name`, and `Mid Init` values are imported explicitly as display/search fields. Stable opaque employee IDs remain derived from the dataset ID and Socrata row identity, so names are never used for identity or deduplication. Agency, agency start date, borough, title, pay basis, leave status, payroll number, fiscal year, and numeric pay facts are normalized into the production employee/version schema.
-
-The import records its source URL, exact SoQL query, fetch time, counts, skip reasons, dataset/fiscal-year metadata, and SHA-256 checksum in `dataset_imports`. Per-employee provenance is retained in `employee_import_records`. No downloaded JSON or imported employee records are committed to Git.
-
-`eval:regression` is offline with respect to NYC: it refuses to run unless PostgreSQL already contains the required imported population. It deterministically builds the shared 300-rule universe and runs at least 100,000 state mutations through:
-
-```text
-Fastify mutation API → transactional outbox → ImpactAnalyzer → worker
-→ ReconciliationService → PostgreSQL materialization → independent full oracle
-```
-
-Every checkpoint compares exact policy IDs. The run fails immediately and writes the seed plus executed mutation prefix if assignment sets, impact completeness, cardinality, determinism, idempotency, duplicate protection, or tenant isolation diverge. Successful human and JSON summaries are written to `eval-results/latest.md` and `eval-results/latest.json`; per-batch replay ledgers and failure artifacts remain ignored because they are large and machine-specific.
-
-During the long randomized phase, ordinary localized employee/group mutations are drained and oracle-verified in batches of up to 1,000. Temporal advances, rule and policy configuration changes, and every other full-population fan-out mutation remain singleton checkpoints that are drained and verified immediately. This verification batch size is independent of the worker's 500-scope reconciliation transaction bound.
-
-The primary report contains exactly five headline metrics:
-
-1. Assignment correctness against the independent full-recompute oracle.
-2. Business-transition conformance across location, department, compensation, role, tenure, and group semantics. This is checked independently of oracle agreement.
-3. Localized production reconciliation latency from job processing start through successful assignment materialization and job completion, with employee-fact, group, and manual-override breakdowns. Evaluator verification-batch residence and oracle verification are excluded; the dedicated isolated benchmark separately measures true API commit-to-visible latency.
-4. Population fan-out completion time, including a measured change affecting at least 10% of the 50,000-person population.
-5. Rule-evaluation work avoided versus equivalent full recomputation, overall and by mutation class.
-
-Cardinality, determinism, idempotency, duplicate-assignment, tenant-isolation, and impact-completeness checks are correctness gates under metric 1. Mutation add/remove/replacement/unchanged counts are diagnostic evidence under metric 2. Worker calibration, batch counts, raw evaluation counts, and total runtime remain available only in the JSON `debug` section.
-
-Useful options:
+`eval:regression` defaults to the certifying 100,000 mutations and does not call NYC during the run. For a non-certifying smoke check:
 
 ```bash
-npm run eval:regression -- --seed=482901 --mutations=1000 --allow-small # non-certifying smoke run
-npm run eval:regression -- --seed=482901 --reuse-prepared              # resume an interrupted pristine baseline
+npm run eval:regression -- --seed=482901 --mutations=1000 --allow-small
 ```
 
-`--reuse-prepared` is guarded: it only requeues the baseline FULL job when the imported source universe still has version 1 facts, zero manual controls, the expected 300 rules, and no unrelated active jobs. Once mutations have begun, a deterministic rebuild is required. Evaluation tenants are excluded from unscoped production workers; the runner's company-scoped worker is the only process that claims their jobs.
+The regression writes `eval-results/latest.json` and `eval-results/latest.md`; the benchmark writes JSON and Markdown under `artifacts/performance/` and deletes its disposable tenant unless `--keep-tenant` is supplied.
 
-Evaluation tenants are excluded from `GET /companies`. `npm run seed:product` creates a separate editable product tenant from the immutable `employee_import_records.normalized_facts` baseline, copies provenance into a product-owned import record, and invokes the same `createCertifiedBaseline()` implementation used by evaluation setup. It then drains one full reconciliation job. Existing product edits are never overwritten. Normal employee edits create new versions only in the product tenant. `npm run seed:product:refresh-nyc` is the deliberate network operation that fetches the same official dataset with the source name fields and transactionally replaces only the editable product tenant; it does not reset or mutate the certified evaluation tenant.
+## One concrete end-to-end example
 
-## Rule representation
-
-Rules are data, never executable code. A published version identifies a policy, priority, effective interval, enabled state, content hash, specificity, and dependencies.
+The seeded NYC workspace actually generates the following published rule, `compensation-employment-status-per-annum-active-5872ea74`, at priority `280`. It targets the `Per Annum Compensation Program` policy in the `SINGLE` category `compensation-program`:
 
 ```json
 {
@@ -139,82 +118,180 @@ Rules are data, never executable code. A published version identifies a policy, 
   "conditions": [
     {
       "type": "comparison",
-      "fact": { "kind": "employee", "field": "location" },
+      "fact": { "kind": "employee", "field": "employment_type" },
       "operator": "EQ",
-      "value": "CA"
+      "value": "per Annum"
     },
     {
       "type": "comparison",
-      "fact": { "kind": "employee", "field": "employment_type" },
+      "fact": { "kind": "attribute", "key": "employment_status" },
       "operator": "EQ",
-      "value": "full_time"
+      "value": "ACTIVE"
     }
   ]
 }
 ```
 
-Supported facts are stable employee fields, arbitrary `attributes.<key>`, group membership, `as_of_date`, and integer `tenure_days`. Missing facts do not match, including `NE`; this avoids accidentally granting a policy because data is absent.
-
-## Resolution semantics
-
-Matching only proposes candidates. Resolution is separate and stable:
-
-1. Manual candidates outrank rule candidates.
-2. Higher numeric priority wins.
-3. More leaf predicates (specificity) wins.
-4. Lexicographically smaller immutable candidate ID is the final tie-break.
-
-A manual `EXCLUDE` competes with assignments for the same policy and can veto lower-precedence proposals. In `SINGLE`, the best remaining distinct policy wins. In `MULTIPLE`, the best proposal for every non-vetoed policy survives. Every losing candidate and reason is retained in the decision.
-
-## API example
-
-All tenant data routes require `X-Company-Id`.
-
-```bash
-curl -X POST http://localhost:3000/companies \
-  -H 'content-type: application/json' \
-  -d '{"name":"YOUR_COMPANY_NAME"}'
-
-curl http://localhost:3000/employees/EMPLOYEE_UUID/assignments \
-  -H 'X-Company-Id: COMPANY_UUID'
-
-curl 'http://localhost:3000/employees/EMPLOYEE_UUID/assignments/as-of?date=2026-08-01' \
-  -H 'X-Company-Id: COMPANY_UUID'
-```
-
-The complete workflow and endpoint list are in [docs/API.md](docs/API.md).
-
-## Correctness evidence
-
-The current suite contains 36 focused tests. The in-memory randomized harness runs **100 deterministic scenarios**, each with **30–60 mutations** across employee fields, groups, rule priority/state, overrides, and time. After every mutation it compares dependency-scoped materialization to an independently implemented full interpreter/resolver, then repeats the same scope to prove retry idempotency. The PostgreSQL regression command above supplies the separate 50,000-employee/100,000-mutation evidence.
-
-The PostgreSQL suite covers exact preview, manual precedence, rejected-candidate explanations, effective-dated history stability, group impact, tenant isolation, concurrent reconciliation serialization, duplicate retry safety, and a persisted tenure transition with no source-row mutation.
-
-Latest verified command:
+For an anonymized employee snapshot with `employment_type = "per Annum"`, `attributes.pay_basis = "per Annum"`, and `attributes.employment_status = "ACTIVE"`, the flow is:
 
 ```text
-Test Files  11 passed (11)
-Tests       35 passed (35)
+effective employee facts
+  → the rule above matches (priority 280, specificity 2)
+  → two other generated rules also propose the same policy:
+      employment_type = "per Annum" (priority 400, specificity 1)
+      attributes.pay_basis = "per Annum" (priority 320, specificity 1)
+  → candidates are grouped by policy; priority 400 controls that policy
+  → SINGLE resolution retains Per Annum Compensation Program
+  → desired {Per Annum Compensation Program} is diffed against current state
+  → an empty scope gets one assignment/history insert; an unchanged retry gets no assignment write
+  → the decision stores the snapshot, all matched candidates, the winner,
+    rejected duplicate proposals and reasons, traces, fingerprint, and next transition
 ```
 
-## Render deployment
+Priority is evaluated before specificity, which is why the priority-400 one-leaf rule controls the same-policy proposals. This example uses generated configuration and observed field values from the local workspace; it is not an NYC policy statement and does not expose an employee identity.
 
-[`render.yaml`](render.yaml) defines one Fastify web service (API plus static admin application), one background reconciliation worker, and one private Render PostgreSQL database. Both Node processes build from the same commit and use the same strongly typed production modules. The web service exposes `/health`; migrations run as an advisory-lock-protected pre-deploy command before each service starts.
+## NYC Open Data evaluation workspace
 
-To deploy:
+The employee source is NYC Open Data's [Citywide Payroll Data](https://data.cityofnewyork.us/api/v3/views/k397-673e/query.json), dataset `k397-673e`. `npm run data:nyc` discovers the latest fiscal year, pages the Socrata endpoint in `:id` order, validates each row, skips malformed rows with counted reasons, and continues until it has **exactly 50,000 usable normalized employee records**; it fails if that target cannot be met. `NYC_APP_TOKEN` is optional.
 
-1. Push this repository to GitHub.
-2. In Render, choose **New → Blueprint** and select the repository.
-3. Ensure the private PostgreSQL database already contains the NYC import, then review the three resources from `render.yaml` and apply the Blueprint. The web pre-deploy command runs migrations and seeds the isolated product workspace without fetching NYC.
-4. Wait for both `policy-assignment-engine-web` and `policy-assignment-engine-worker` to become live.
-5. Open `https://YOUR-WEB-SERVICE.onrender.com/admin/`, select **NYC Open Data Policy Workspace**, and verify `/health` returns `{ "status": "ok" }`.
+The importer maps source fields as follows:
 
-`DATABASE_URL` is wired from the private database by the Blueprint. Render supplies `PORT`; the application binds `HOST=0.0.0.0`. The NYC network import is a one-time data preparation step, never an application-load path. For a production organization, place the service behind an authenticated admin gateway that authorizes the company context; `X-Company-Id` is tenant isolation, not authentication.
+| Citywide Payroll source | Engine field |
+|---|---|
+| `:id` plus dataset ID | Stable opaque hashed `external_id`; names are not used for identity or deduplication |
+| `first_name`, `last_name`, `mid_init` | Source-name/display fields |
+| `agency_name` | `department` |
+| `agency_start_date` | `hire_date` |
+| `work_location_borough` | `location` |
+| `pay_basis` | `employment_type` and `attributes.pay_basis` |
+| `title_description` | `attributes.job_title` |
+| `leave_status_as_of_june_30` | `attributes.employment_status` |
+| `payroll_number`, `fiscal_year` | `attributes.payroll_number`, `attributes.fiscal_year` |
+| `base_salary`, `regular_hours`, `regular_gross_paid` | Same-named numeric attributes when present |
+| `ot_hours`, `total_ot_paid`, `total_other_pay` | `attributes.overtime_hours`, `attributes.overtime_paid`, `attributes.other_pay` when present |
 
-## Operational notes
+`dataset_imports` retains the source URL, exact SoQL query template, fetch/completion times, row counts, skip reasons, fiscal-year metadata, and a SHA-256 population checksum. `employee_import_records` retains source-row identity, per-record checksum, and normalized facts. No downloaded payroll JSON or imported employee rows are committed to Git.
 
-- PostgreSQL is authoritative; API assignment reads never run the rule engine.
-- Dates are UTC calendar dates with half-open intervals `[valid_from, valid_to)`.
-- Important identities/keys and category cardinality are immutable through the API. A new effective-dated version changes mutable policy, rule, and employee data.
-- API authentication is intentionally left to a trusted admin gateway; `X-Company-Id` provides isolation, not identity proof.
-- Worker failures are visible in `/reconciliation/jobs`; errors are retried with exponential backoff and become `DEAD` after the configured maximum.
+This source provides a broad, irregular population across agencies, boroughs, titles, pay bases, employment statuses, pay values, and tenure. It is useful for exercising large rule populations, narrow employee changes, selector-based rule impact, temporal changes, and broad fan-out without generating uniform toy employees.
+
+The policy configuration is entirely **fictional and synthetic**. It is not official NYC policy, law, eligibility guidance, or a claim about any employee. `createCertifiedBaseline()` derives six demonstration categories from observed fact distributions, creates eight cohort groups from the largest observed departments, and generates exactly 50 structured rules per category—**300 rules total**. For the frozen 50,000-row dataset the builder produced 146 policies. Product seeding and regression setup call the same builder; only tenant-local UUID namespaces differ.
+
+`npm run seed:product` performs no network request. It copies the persisted normalized facts and provenance into a separate editable product tenant, builds the synthetic configuration, and drains the initial reconciliation job. `npm run seed:product:refresh-nyc` is the deliberate network-enabled path that replaces only the product workspace; normal product edits do not mutate the isolated evaluation tenant.
+
+## Architecture and execution flow
+
+The API and worker are separate processes over one PostgreSQL database but share the same domain and service modules:
+
+```text
+source change
+  → effective-dated/versioned write + reconciliation job in one transaction
+  → dependency and selector impact analysis
+  → affected (employee, category) scopes
+  → as-of employee/group/policy/rule/manual-control snapshot
+  → compiled rule evaluation and matched candidates
+  → deterministic resolution
+  → desired-vs-current minimal diff under a per-scope advisory lock
+  → materialized assignments + assignment history + decision evidence
+  → replacement of future scheduled transitions for that scope
+```
+
+Current assignment reads use `materialized_assignments`; they do not execute rules. See [Architecture](docs/ARCHITECTURE.md) for the schema, transaction boundaries, indexes, and concurrency discussion, and [API guide](docs/API.md) for endpoint payloads.
+
+## Incremental reconciliation
+
+Incremental reconciliation is the normal execution model. Each source mutation writes a typed job payload, and impact analysis conservatively narrows work without omitting a scope that might change:
+
+- Changed stable employee fields and `attributes.<key>` values select only categories whose published rules depend on those keys for that employee.
+- A membership change selects categories whose rules depend on that exact group for that employee.
+- A published rule version unions the previous and new category/selector populations, covering employees entering or leaving the selector. If no logically safe mandatory selector exists, that rule's category falls back to all active employees.
+- A policy version selects current assignees plus selector populations for published rules targeting that policy.
+- A manual assignment, exclusion, or revocation targets its exact employee/category.
+- A due rule/override/tenure/calendar boundary targets its scheduled employee/category.
+- A broad rule change becomes independently claimable 500-scope child jobs; each child still reconciles scopes in transactions of at most 500.
+
+For every affected scope, reconciliation recomputes desired state from the effective snapshot without trusting the current assignment. It then inserts missing policies, removes stale policies, closes or deletes only the corresponding history intervals, and leaves unchanged assignment rows untouched. Replaying the scope therefore converges independently and produces an empty assignment diff when state is already correct.
+
+## Rule engine
+
+Rules are structured data, never arbitrary executable code. The recursive AST supports:
+
+- `and`, `or`, and `not` nodes;
+- comparisons with `EQ`, `NE`, `GT`, `GTE`, `LT`, `LTE`, `IN`, and `NOT_IN`;
+- stable employee facts: `external_id`, `email`, `location`, `department`, `employment_type`, `is_manager`, and `hire_date`;
+- arbitrary `attributes.<key>` facts;
+- `tenure_days` and `as_of_date`; and
+- group `MEMBER_OF` / `NOT_MEMBER_OF` nodes.
+
+Missing facts do not match, including negative operators. Compilation validates the AST, canonicalizes and hashes content, counts leaf predicates as specificity, extracts field/attribute/group/time dependencies, and marks only logically safe positive equality/`IN`/membership selectors as mandatory. For `OR`, a selector is mandatory only when it appears in every branch; selectors under `NOT` never narrow impact.
+
+Compiled rules are cached by immutable rule-version ID and checked against the stored content hash. Persisted dependencies drive impact analysis. Reconciliation, rule preview, employee preview, and manual-control preview reuse the same evaluator/resolver; its matched-candidate traces are then persisted for explanation reads.
+
+## Deterministic resolution
+
+Matching rules and active manual controls first produce candidates. Candidates are ordered by the implemented tuple:
+
+```text
+manual before rule
+→ priority DESC
+→ specificity DESC
+→ candidate_id ASC
+→ policy_id ASC
+```
+
+Resolution first chooses the controlling candidate for each distinct policy. If that candidate is a manual `EXCLUDE`, the policy is vetoed and the exclusion plus losing proposals are recorded as rejected evidence.
+
+- `SINGLE`: sort the remaining per-policy winners by the same tuple and retain zero or one policy.
+- `MULTIPLE`: retain one winning proposal for every non-vetoed distinct policy.
+
+Manual candidates therefore outrank rule candidates even when their numeric priority is lower. Priority is the deliberate business-order control; specificity—the number of leaf predicates—breaks equal-priority ties, followed by immutable candidate IDs. Because evaluation and resolution explicitly sort stable identifiers, identical effective inputs produce identical winners regardless of SQL row order, input order, or worker timing.
+
+## Effective dating, auditability, and “Why?”
+
+The engine uses UTC calendar dates and half-open intervals `[valid_from, valid_to)`. Employee and policy facts are versioned; group memberships, rule versions, manual controls, and assignment history are dated. PostgreSQL exclusion constraints prevent overlapping employee versions, memberships, and assignment-history intervals. The current mutation API intentionally rejects backdated changes to existing identities.
+
+Every evaluated employee/category scope has an `assignment_decisions` record or reuses one with the same as-of date and input fingerprint. A new record stores:
+
+- the employee-version ID and complete effective snapshot, including sorted group IDs;
+- the as-of date, input fingerprint, decision time, and source reconciliation-job ID;
+- every matched rule/manual candidate;
+- winning and rejected candidates, priority, specificity, rule-version or override IDs, winner references, and rejection reasons;
+- condition paths plus actual/operator/expected/matched trace values for matched rule candidates; and
+- the next computed transition date.
+
+`assignment_history` identifies which decision opened each assignment interval. For “Why does employee X have policy Y as of date Z?”, the as-of endpoint resolves the assignment interval at `Z`; given that assignment ID, the explanation endpoint loads the latest decision at or before `Z` whose winner set contains the policy. The response enriches stored policy/rule IDs with dated names and keys and returns the employee snapshot, winning source, competing candidates, summary, and next transition. Non-matching rule evaluations are not persisted as candidates.
+
+## Verification and measured results
+
+The production-oriented verification harness uses the imported 50,000-employee population, the shared six-category/300-rule synthetic universe, normal mutation APIs and jobs, and an independently implemented full interpreter/resolver. These are reproducible engineering measurements, not production SLOs.
+
+| Measurement | Verified result | What it means |
+|---|---:|---|
+| Independent oracle | **0 mismatches across 8,669,892 assignment-set comparisons** | The frozen 100,000-mutation regression found no materialized assignment divergence from the independent full oracle. |
+| Rule-quality/business-transition checks | **103 / 103** | Expected transitions passed across location, department, employment/compensation, job role, tenure, and group membership. |
+| Isolated reconciliation latency | **p50 249.663 ms / p95 507.949 ms / p99 693.981 ms** | Across 300 isolated normal API mutations, this measures durable job commit through visible assignment materialization and successful job completion; batch residence and oracle time are excluded. |
+| 50,000-scope rule fan-out | **61,524.063 ms / 812.690 scopes/sec** | One rule change completed 100 durable 500-scope work units using 16 effective workers. |
+| Incremental work avoided | **70.416%** | The frozen regression executed 30,480,640 rule evaluations instead of 103,030,324 for equivalent full recomputation. |
+
+The committed [human regression report](eval-results/latest.md) and [JSON artifact](eval-results/latest.json) are the frozen 100,000-mutation sources for oracle correctness, transition conformance, and avoided work. Their old latency/fan-out fields predate the corrected isolated measurement and durable rule fan-out; the optimized figures above are the accepted final benchmark measurements summarized in the separately supplied PDF.
+
+The regression also gates cardinality, determinism, retry idempotency, duplicate active assignments, tenant isolation, and impact completeness. It fails on divergence and records the seed plus executed mutation prefix for replay. Localized employee, group, manual-control, and duplicate-delivery mutations are oracle-checked in batches of at most 1,000; temporal, rule, and policy fan-outs are singleton checkpoints. That verification batch size is independent of the worker's 500-scope reconciliation transaction bound.
+
+## Tradeoffs and boundaries
+
+- **Materialized reads vs. reconciliation writes:** assignment reads are simple PostgreSQL queries, but source changes converge asynchronously through jobs rather than evaluating rules in the request.
+- **PostgreSQL coordination vs. a broker:** the database atomically owns source state, jobs, claims, locks, decisions, and assignments, reducing coordination components while placing queue/load responsibility on PostgreSQL.
+- **Precise scheduling vs. sweeps:** persisted rule, override, tenure, and calendar transitions avoid population-wide polling, at the cost of maintaining future schedule rows per affected scope.
+- **Bounded fan-out vs. globally atomic visibility:** broad rule changes make progress through independently committed partitions, so a very broad change has a temporary convergence window; the measured 50,000-scope run took 61,524.063 ms.
+- **Calendar-day semantics:** the model resolves one final state per UTC date rather than intraday effective timestamps.
+
+Operational failures and retry counts are visible through `GET /reconciliation/jobs`. `npm run db:reset` refuses production databases and, unless `ALLOW_DATABASE_RESET=true`, accepts only database names ending in `_test`.
+
+## Project links
+
+- **Code:** <https://github.com/pmukeshreddy/policy-assignment-engine>
+- **Video walkthrough:** <https://www.loom.com/share/a424face036a4d1989bd9baeb657ffe0>
+- **Database / ERD:** <https://dbdiagram.io/d/6a98e60f5450bea1bed60889>
+- **Implementation architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **API guide:** [docs/API.md](docs/API.md)
+- **Admin UX rationale:** [docs/UX_DESIGN.md](docs/UX_DESIGN.md)
+- **Design report:** PDF supplied separately with the take-home submission; no PDF file or public report URL is present in this repository.
