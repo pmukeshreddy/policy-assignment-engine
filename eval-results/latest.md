@@ -2,15 +2,15 @@
 
 This reviewer summary combines the frozen 100,000-mutation certification with the accepted `optimized-targeted-v3` isolated performance measurements. The measurements are verification-harness results, not production SLOs.
 
-| Measurement | Latest verified result |
-|---|---:|
-| Independent oracle | **0 mismatches across 8,669,892 assignment-set comparisons** |
-| Business-transition conformance | **103 / 103 passed** |
-| Isolated reconciliation latency (300 mutations) | **p50 249.663 ms / p95 507.949 ms / p99 693.981 ms** |
-| 50,000-scope rule fan-out (100 work units, 16 effective workers) | **61,524.063 ms / 812.690 scopes/sec** |
-| Incremental rule-evaluation work avoided | **70.416%** — 30,480,640 incremental evaluations vs. 103,030,324 equivalent full-recompute evaluations |
+| Measurement | Verified result | What it means |
+|---|---:|---|
+| Independent oracle | **0 mismatches across 8,669,892 assignment-set comparisons** | The frozen 100,000-mutation regression found no materialized assignment divergence from the independent full oracle. |
+| Rule-quality/business-transition checks | **103 / 103** | Expected transitions passed across location, department, employment/compensation, job role, tenure, and group membership. |
+| Isolated reconciliation latency | **p50 249.663 ms / p95 507.949 ms / p99 693.981 ms** | Across 300 isolated normal API mutations, this measures durable job commit through visible assignment materialization and successful job completion; batch residence and oracle time are excluded. |
+| 50,000-scope rule fan-out | **61,524.063 ms / 812.690 scopes/sec** | One rule change completed 100 durable 500-scope work units using 16 effective workers. |
+| Incremental work avoided | **70.416%** | The frozen regression executed 30,480,640 rule evaluations instead of 103,030,324 for equivalent full recomputation. |
 
-The [full final metrics report](final-submission-metrics.md) and [machine-readable artifact](final-submission-metrics.json) record the accepted values and their provenance. The original certification output is preserved unchanged in the [frozen certification directory](certification-100k-seed-482901-e6fa29b/).
+The committed [machine-readable artifact](latest.json) records the same accepted values. The certification detail below is retained to document the correctness, transition-conformance, and avoided-work evidence behind the summary.
 
 ## Frozen 100,000-mutation certification detail
 

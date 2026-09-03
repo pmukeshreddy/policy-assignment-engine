@@ -1,4 +1,43 @@
 {
+  "reportType": "LATEST_VERIFIED_RESULTS",
+  "latestVerifiedResults": {
+    "independentOracle": {
+      "assignmentSetMismatches": 0,
+      "assignmentSetComparisons": 8669892,
+      "meaning": "The frozen 100,000-mutation regression found no materialized assignment divergence from the independent full oracle.",
+      "source": "frozen 100,000-mutation certification"
+    },
+    "businessTransitionConformance": {
+      "passed": 103,
+      "tested": 103,
+      "meaning": "Expected transitions passed across location, department, employment and compensation, job role, tenure, and group membership.",
+      "source": "frozen 100,000-mutation certification"
+    },
+    "isolatedReconciliationLatencyMs": {
+      "samples": 300,
+      "p50": 249.663,
+      "p95": 507.949,
+      "p99": 693.981,
+      "meaning": "Across 300 isolated normal API mutations, measured from durable job commit through visible assignment materialization and successful job completion; batch residence and oracle time were excluded.",
+      "source": "accepted optimized-targeted-v3 measurements"
+    },
+    "ruleFanOut": {
+      "affectedScopes": 50000,
+      "workUnits": 100,
+      "effectiveWorkers": 16,
+      "completionMs": 61524.063,
+      "scopesPerSecond": 812.690,
+      "meaning": "One rule change completed 100 durable 500-scope work units using 16 effective workers.",
+      "source": "accepted optimized-targeted-v3 measurements"
+    },
+    "incrementalWorkAvoided": {
+      "incrementalRuleEvaluations": 30480640,
+      "equivalentFullRecomputeRuleEvaluations": 103030324,
+      "percent": 70.416,
+      "meaning": "The frozen regression executed 30,480,640 rule evaluations instead of 103,030,324 for equivalent full recomputation.",
+      "source": "frozen 100,000-mutation certification"
+    }
+  },
   "status": "PASSED",
   "seed": 482901,
   "dataset": {
@@ -9,7 +48,7 @@
   "employees": 50000,
   "rules": 300,
   "stateMutations": 100000,
-  "headlineMetrics": {
+  "frozenCertificationMetrics": {
     "assignmentCorrectness": {
       "assignmentSetDivergences": 0,
       "totalAssignmentSetComparisons": 8669892,
@@ -463,8 +502,7 @@
     ]
   },
   "artifacts": {
-    "json": "/Users/mukeshreddypochamreddy/Downloads/policy-assignment-engine-main/eval-results/latest.json",
-    "markdown": "/Users/mukeshreddypochamreddy/Downloads/policy-assignment-engine-main/eval-results/latest.md",
-    "batches": "/Users/mukeshreddypochamreddy/Downloads/policy-assignment-engine-main/eval-results/batches-seed-482901.jsonl"
+    "json": "eval-results/latest.json",
+    "markdown": "eval-results/latest.md"
   }
 }
