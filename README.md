@@ -286,9 +286,8 @@ The regression also gates cardinality, determinism, retry idempotency, duplicate
 
 Operational failures and retry counts are visible through `GET /reconciliation/jobs`. `npm run db:reset` refuses production databases and, unless `ALLOW_DATABASE_RESET=true`, accepts only database names ending in `_test`.
 
-## Project links
+## Documentation and walkthrough
 
-- **Code:** <https://github.com/pmukeshreddy/policy-assignment-engine>
 - **Video walkthrough:** <https://www.loom.com/share/a424face036a4d1989bd9baeb657ffe0>
 - **Database / ERD:** <https://dbdiagram.io/d/6a98e60f5450bea1bed60889>
 - **Implementation architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
